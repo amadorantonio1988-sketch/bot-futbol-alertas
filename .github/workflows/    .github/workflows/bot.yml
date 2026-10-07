@@ -42,4 +42,12 @@ jobs:
 
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-        run: python bot.py
+        - name: Ejecutar bot
+
+  env:
+
+    API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+
+  run: |
+
+    python bot.py
