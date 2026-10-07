@@ -22,15 +22,15 @@ MIN_PROBABILITY = 0.62
 
 MIN_VALUE = 0.05
 
-# Máximo de partidos a analizar con predictions por ejecución.
-
-# Evita consumir rápidamente la cuota de API-Football.
-
 MAX_PREDICTIONS = 20
 
 def api_get(endpoint, params=None):
 
-    headers = {"x-apisports-key": API_KEY}
+    headers = {
+
+        "x-apisports-key": API_KEY
+
+    }
 
     response = requests.get(
 
@@ -46,7 +46,11 @@ def api_get(endpoint, params=None):
 
     if response.status_code == 429:
 
-        raise Exception("API-Football: límite de solicitudes alcanzado (429)")
+        raise Exception(
+
+            "API-Football: límite de solicitudes alcanzado (429)"
+
+        )
 
     response.raise_for_status()
 
@@ -60,7 +64,13 @@ def api_get(endpoint, params=None):
 
 def telegram(message):
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = (
+
+        f"https://api.telegram.org/"
+
+        f"bot{TELEGRAM_TOKEN}/sendMessage"
+
+    )
 
     response = requests.post(
 
@@ -82,67 +92,241 @@ def telegram(message):
 
 def poisson_probability(lam, goals):
 
-    return math.exp(-lam) * (lam ** goals) / math.factorial(goals)
+    try:
 
-def probability_over(lam, line):
+        lam = float(lam)
 
-    max_goals = int(math.floor(line))
+        goals = int(goals)
 
-    under = sum(
+    except:
 
-        poisson_probability(lam, g)
+        return 0.0
 
-        for g in range(max_goals + 1)
+    if lam < 0 or lam > 10:
+
+        return 0.0
+
+    return (
+
+        math.exp(-lam)
+
+        * (lam ** goals)
+
+        / math.factorial(goals)
 
     )
 
-    return 1 - under
+def probability_over(lam, line):
+
+    try:
+
+        lam = float(lam)
+
+        line = float(line)
+
+    except:
+
+        return 0.0
+
+    if lam < 0 or lam > 10:
+
+        return 0.0
+
+    max_goals = int(math.floor(line))
+
+    under_or_equal = 0.0
+
+    for goals in range(max_goals + 1):
+
+        under_or_equal += poisson_probability(
+
+            lam,
+
+            goals
+
+        )
+
+    probability = 1.0 - under_or_equal
+
+    return max(
+
+        0.0,
+
+        min(1.0, probability)
+
+    )
 
 def probability_btts(home_lambda, away_lambda):
+
+    try:
+
+        home_lambda = float(home_lambda)
+
+        away_lambda = float(away_lambda)
+
+    except:
+
+        return 0.0
+
+    if (
+
+        home_lambda < 0
+
+        or away_lambda < 0
+
+        or home_lambda > 10
+
+        or away_lambda > 10
+
+    ):
+
+        return 0.0
 
     home_scores = 1 - math.exp(-home_lambda)
 
     away_scores = 1 - math.exp(-away_lambda)
 
-    return home_scores * away_scores
+    probability = (
 
-def get_probability(prediction, market, selection):
+        home_scores
 
-    percent = prediction.get("percent", {})
+        * away_scores
+
+    )
+
+    return max(
+
+        0.0,
+
+        min(1.0, probability)
+
+    )
+
+def get_probability(
+
+    prediction,
+
+    market,
+
+    selection
+
+):
+
+    percent = prediction.get(
+
+        "percent",
+
+        {}
+
+    )
 
     if market == "winner":
 
         if selection == "Home":
 
-            return float(
+            try:
 
-                percent.get("home", "0").replace("%", "")
+                return (
 
-            ) / 100
+                    float(
+
+                        percent.get(
+
+                            "home",
+
+                            "0"
+
+                        ).replace("%", "")
+
+                    ) / 100
+
+                )
+
+            except:
+
+                return 0.0
 
         if selection == "Draw":
 
-            return float(
+            try:
 
-                percent.get("draw", "0").replace("%", "")
+                return (
 
-            ) / 100
+                    float(
+
+                        percent.get(
+
+                            "draw",
+
+                            "0"
+
+                        ).replace("%", "")
+
+                    ) / 100
+
+                )
+
+            except:
+
+                return 0.0
 
         if selection == "Away":
 
-            return float(
+            try:
 
-                percent.get("away", "0").replace("%", "")
+                return (
 
-            ) / 100
+                    float(
 
-    goals = prediction.get("goals", {})
+                        percent.get(
+
+                            "away",
+
+                            "0"
+
+                        ).replace("%", "")
+
+                    ) / 100
+
+                )
+
+            except:
+
+                return 0.0
+
+    goals = prediction.get(
+
+        "goals",
+
+        {}
+
+    )
 
     try:
 
-        home_goals = float(goals.get("home", 1.0))
+        home_goals = float(
 
-        away_goals = float(goals.get("away", 1.0))
+            goals.get(
+
+                "home",
+
+                1.0
+
+            )
+
+        )
+
+        away_goals = float(
+
+            goals.get(
+
+                "away",
+
+                1.0
+
+            )
+
+        )
 
     except:
 
@@ -150,25 +334,79 @@ def get_probability(prediction, market, selection):
 
         away_goals = 1.0
 
-    total_goals = home_goals + away_goals
+    # Protección contra valores imposibles.
+
+    home_goals = max(
+
+        0.0,
+
+        min(10.0, home_goals)
+
+    )
+
+    away_goals = max(
+
+        0.0,
+
+        min(10.0, away_goals)
+
+    )
+
+    total_goals = max(
+
+        0.0,
+
+        min(
+
+            10.0,
+
+            home_goals + away_goals
+
+        )
+
+    )
 
     if market == "goals":
 
         if selection.lower() == "over 1.5":
 
-            return probability_over(total_goals, 1.5)
+            return probability_over(
+
+                total_goals,
+
+                1.5
+
+            )
 
         if selection.lower() == "over 2.5":
 
-            return probability_over(total_goals, 2.5)
+            return probability_over(
+
+                total_goals,
+
+                2.5
+
+            )
 
         if selection.lower() == "under 2.5":
 
-            return 1 - probability_over(total_goals, 2.5)
+            return (
+
+                1
+
+                - probability_over(
+
+                    total_goals,
+
+                    2.5
+
+                )
+
+            )
 
     if market == "btts":
 
-        p = probability_btts(
+        probability = probability_btts(
 
             home_goals,
 
@@ -186,17 +424,31 @@ def get_probability(prediction, market, selection):
 
         ]:
 
-            return p
+            return probability
 
-        return 1 - p
+        return 1 - probability
 
-    return 0
+    return 0.0
 
-def find_odds(odds_item, home, away):
+def find_odds(
+
+    odds_item,
+
+    home,
+
+    away
+
+):
 
     candidates = []
 
-    for bookmaker in odds_item.get("bookmakers", []):
+    for bookmaker in odds_item.get(
+
+        "bookmakers",
+
+        []
+
+    ):
 
         bookmaker_name = bookmaker.get(
 
@@ -206,29 +458,65 @@ def find_odds(odds_item, home, away):
 
         )
 
-        for bet in bookmaker.get("bets", []):
+        for bet in bookmaker.get(
 
-            market_name = bet.get("name", "")
+            "bets",
+
+            []
+
+        ):
+
+            market_name = bet.get(
+
+                "name",
+
+                ""
+
+            )
 
             normalized = market_name.lower()
 
-            for value in bet.get("values", []):
+            for value in bet.get(
+
+                "values",
+
+                []
+
+            ):
 
                 try:
 
-                    odd = float(value.get("odd"))
+                    odd = float(
+
+                        value.get("odd")
+
+                    )
 
                 except:
 
                     continue
 
-                if not (MIN_ODD <= odd <= MAX_ODD):
+                if not (
+
+                    MIN_ODD
+
+                    <= odd
+
+                    <= MAX_ODD
+
+                ):
 
                     continue
 
                 selection = str(
 
-                    value.get("value", "")
+                    value.get(
+
+                        "value",
+
+                        ""
+
+                    )
 
                 )
 
@@ -308,13 +596,31 @@ def find_odds(odds_item, home, away):
 
     return candidates
 
-def analyze_fixture(fixture, odds_item):
+def analyze_fixture(
 
-    fixture_id = fixture["fixture"]["id"]
+    fixture,
 
-    home = fixture["teams"]["home"]["name"]
+    odds_item
 
-    away = fixture["teams"]["away"]["name"]
+):
+
+    fixture_id = fixture[
+
+        "fixture"
+
+    ]["id"]
+
+    home = fixture[
+
+        "teams"
+
+    ]["home"]["name"]
+
+    away = fixture[
+
+        "teams"
+
+    ]["away"]["name"]
 
     candidates = find_odds(
 
@@ -330,13 +636,15 @@ def analyze_fixture(fixture, odds_item):
 
         return []
 
-    # Solo ahora hacemos la consulta costosa de predictions.
-
     prediction_data = api_get(
 
         "predictions",
 
-        {"fixture": fixture_id}
+        {
+
+            "fixture": fixture_id
+
+        }
 
     )
 
@@ -344,7 +652,11 @@ def analyze_fixture(fixture, odds_item):
 
         return []
 
-    prediction = prediction_data[0].get(
+    prediction = prediction_data[
+
+        0
+
+    ].get(
 
         "predictions",
 
@@ -366,17 +678,33 @@ def analyze_fixture(fixture, odds_item):
 
         )
 
+        # Protección adicional:
+
+        # ninguna probabilidad puede superar 100%.
+
+        probability = max(
+
+            0.0,
+
+            min(1.0, probability)
+
+        )
+
         if probability < MIN_PROBABILITY:
 
             continue
 
-        implied_probability = 1 / candidate["odd"]
+        implied_probability = (
+
+            1 / candidate["odd"]
+
+        )
 
         value = (
 
-            probability -
+            probability
 
-            implied_probability
+            - implied_probability
 
         )
 
@@ -386,9 +714,9 @@ def analyze_fixture(fixture, odds_item):
 
         score = (
 
-            probability * 100 +
+            probability * 100
 
-            value * 100
+            + value * 100
 
         )
 
@@ -424,15 +752,27 @@ def main():
 
     if not API_KEY:
 
-        raise Exception("Falta API_FOOTBALL_KEY")
+        raise Exception(
+
+            "Falta API_FOOTBALL_KEY"
+
+        )
 
     if not TELEGRAM_TOKEN:
 
-        raise Exception("Falta TELEGRAM_BOT_TOKEN")
+        raise Exception(
+
+            "Falta TELEGRAM_BOT_TOKEN"
+
+        )
 
     if not CHAT_ID:
 
-        raise Exception("Falta TELEGRAM_CHAT_ID")
+        raise Exception(
+
+            "Falta TELEGRAM_CHAT_ID"
+
+        )
 
     honduras = timezone(
 
@@ -446,15 +786,17 @@ def main():
 
     ).strftime("%Y-%m-%d")
 
-    print(f"Fecha Honduras: {today}")
+    print(
 
-    # --------------------------------------------------
+        f"Fecha Honduras: {today}"
 
-    # 1. UNA SOLA CONSULTA PARA LAS CUOTAS DEL DÍA
+    )
 
-    # --------------------------------------------------
+    print(
 
-    print("Buscando cuotas del día...")
+        "Buscando cuotas del día..."
+
+    )
 
     odds_response = api_get(
 
@@ -470,7 +812,7 @@ def main():
 
     print(
 
-        f"Partidos con cuotas encontrados: "
+        "Partidos con cuotas encontrados: "
 
         f"{len(odds_response)}"
 
@@ -494,13 +836,11 @@ def main():
 
         return
 
-    # --------------------------------------------------
+    print(
 
-    # 2. OBTENER FIXTURES DEL DÍA
+        "Buscando partidos del día..."
 
-    # --------------------------------------------------
-
-    print("Buscando partidos del día...")
+    )
 
     fixtures = api_get(
 
@@ -540,13 +880,11 @@ def main():
 
         ]["id"]
 
-        fixture_map[fixture_id] = fixture
+        fixture_map[
 
-    # --------------------------------------------------
+            fixture_id
 
-    # 3. UNIR CUOTAS + PARTIDOS
-
-    # --------------------------------------------------
+        ] = fixture
 
     candidates_with_odds = []
 
@@ -620,22 +958,6 @@ def main():
 
     )
 
-    # --------------------------------------------------
-
-    # 4. PRIORIZAR PARTIDOS
-
-    # --------------------------------------------------
-
-    # Primero analizamos partidos con cuotas
-
-    # dentro del rango más interesante.
-
-    #
-
-    # Ordenamos por proximidad a la zona
-
-    # 1.55-1.80.
-
     def fixture_priority(item):
 
         fixture, odds_item = item
@@ -686,12 +1008,6 @@ def main():
 
     )
 
-    # --------------------------------------------------
-
-    # 5. SOLO MAX_PREDICTIONS PREDICTIONS
-
-    # --------------------------------------------------
-
     selected = candidates_with_odds[
 
         :MAX_PREDICTIONS
@@ -702,7 +1018,9 @@ def main():
 
         "Partidos que serán analizados "
 
-        f"con predictions: {len(selected)}"
+        "con predictions: "
+
+        f"{len(selected)}"
 
     )
 
@@ -730,7 +1048,7 @@ def main():
 
             print(
 
-                f"Error analizando "
+                "Error analizando "
 
                 f'{fixture["teams"]["home"]["name"]} vs '
 
@@ -740,12 +1058,6 @@ def main():
 
             )
 
-    # --------------------------------------------------
-
-    # 6. ORDENAR RESULTADOS
-
-    # --------------------------------------------------
-
     all_candidates.sort(
 
         key=lambda x: x["score"],
@@ -754,11 +1066,15 @@ def main():
 
     )
 
-    # --------------------------------------------------
+    print(
 
-    # 7. ENVIAR RESULTADO A TELEGRAM
+        "Apuestas que cumplen todos "
 
-    # --------------------------------------------------
+        "los filtros: "
+
+        f"{len(all_candidates)}"
+
+    )
 
     if not all_candidates:
 
@@ -772,7 +1088,9 @@ def main():
 
             "cumplan todos los filtros.\n\n"
 
-            f"Cuotas: {MIN_ODD:.2f}–{MAX_ODD:.2f}\n"
+            f"Cuotas: "
+
+            f"{MIN_ODD:.2f}–{MAX_ODD:.2f}\n"
 
             f"Probabilidad mínima: "
 
@@ -782,7 +1100,7 @@ def main():
 
             f"{len(candidates_with_odds)}\n"
 
-            f"Predicciones analizadas: "
+            f"Predictions analizadas: "
 
             f"{len(selected)}\n\n"
 
@@ -804,7 +1122,9 @@ def main():
 
         f"{best['away']}\n\n"
 
-        f"🎯 Mercado: {best['market']}\n"
+        f"🎯 Mercado: "
+
+        f"{best['market']}\n"
 
         f"✅ Selección: "
 
