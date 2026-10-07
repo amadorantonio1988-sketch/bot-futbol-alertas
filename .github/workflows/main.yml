@@ -28,13 +28,13 @@ jobs:
 
           python-version: "3.11"
 
-      - name: Instalar dependencias
+          - name: Instalar dependencias
 
         run: |
 
           pip install -r requirements.txt
 
-            - name: Ejecutar bot
+      - name: Ejecutar bot
 
         env:
 
