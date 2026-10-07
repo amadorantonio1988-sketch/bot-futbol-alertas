@@ -1,22 +1,22 @@
-name: Bot de apuestas
+name: Bot fútbol alertas
 
 on:
 
+  workflow_dispatch:
+
   schedule:
 
-    - cron: "0 13 * * *"
-
-  workflow_dispatch:
+    - cron: "*/10 * * * *"
 
 jobs:
 
-  ejecutar-bot:
+  bot:
 
     runs-on: ubuntu-latest
 
     steps:
 
-      - name: Descargar código
+      - name: Descargar repositorio
 
         uses: actions/checkout@v4
 
@@ -26,11 +26,13 @@ jobs:
 
         with:
 
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Instalar dependencias
 
-        run: pip install -r requirements.txt
+        run: |
+
+          pip install -r requirements.txt
 
       - name: Ejecutar bot
 
@@ -38,8 +40,6 @@ jobs:
 
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
 
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
 
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: python bot.py
+          python bot.py
