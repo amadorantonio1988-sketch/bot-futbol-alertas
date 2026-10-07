@@ -2,6 +2,8 @@ import os
 
 import requests
 
+from collections import defaultdict
+
 from datetime import datetime, timezone, timedelta
 
 API_KEY = os.getenv("API_FOOTBALL_KEY")
@@ -14,23 +16,29 @@ BASE_URL = "https://v3.football.api-sports.io"
 
 # ============================================================
 
-# FILTROS PRINCIPALES
+# CONFIGURACIÓN
 
 # ============================================================
 
 MIN_ODD = 1.50
 
-MAX_ODD = 1.90
-
 MIN_PROBABILITY = 0.60
 
-MAX_PROBABILITY = 0.80
+MIN_CONFIDENCE = 70
 
-MIN_VALUE = 0.05
+HIGH_CONFIDENCE = 75
+
+VERY_HIGH_CONFIDENCE = 85
 
 MAX_PREDICTIONS = 20
 
 MAX_ALERTS = 5
+
+# Evita analizar mercados extremadamente raros
+
+# con información insuficiente.
+
+MIN_BOOKMAKERS = 2
 
 # ============================================================
 
@@ -62,7 +70,7 @@ def api_get(endpoint, params=None):
 
         raise Exception(
 
-            "API-Football: límite de solicitudes alcanzado (429)"
+            "API-Football límite 429"
 
         )
 
@@ -72,9 +80,17 @@ def api_get(endpoint, params=None):
 
     if data.get("errors"):
 
-        raise Exception(str(data["errors"]))
+        raise Exception(
 
-    return data.get("response", [])
+            str(data["errors"])
+
+        )
+
+    return data.get(
+
+        "response",
+
+        [])
 
 # ============================================================
 
@@ -116,39 +132,15 @@ def telegram(message):
 
 # ============================================================
 
-def clean_percent(value):
-
-    """
-
-    Convierte:
-
-    '65%' -> 0.65
-
-    65 -> 0.65
-
-    None -> 0.0
-
-    """
-
-    if value is None:
-
-        return 0.0
+def safe_float(value):
 
     try:
 
-        text = str(value).replace("%", "").strip()
-
-        number = float(text)
-
-        if number > 1:
-
-            number = number / 100
-
-        return max(0.0, min(1.0, number))
+        return float(value)
 
     except:
 
-        return 0.0
+        return None
 
 def implied_probability(odd):
 
@@ -160,175 +152,127 @@ def implied_probability(odd):
 
             return 0.0
 
-        return 1 / odd
+        return 1.0 / odd
 
     except:
 
         return 0.0
 
-def calculate_value(probability, odd):
+def clean_percent(value):
 
-    return probability - implied_probability(odd)
+    if value is None:
+
+        return None
+
+    try:
+
+        value = str(value).replace(
+
+            "%",
+
+            ""
+
+        ).strip()
+
+        number = float(value)
+
+        if number > 1:
+
+            number /= 100
+
+        return max(
+
+            0.0,
+
+            min(1.0, number)
+
+        )
+
+    except:
+
+        return None
 
 # ============================================================
 
-# PROBABILIDAD DEL MERCADO
+# NORMALIZAR NOMBRE DEL MERCADO
 
 # ============================================================
 
-def get_probability(prediction, market, selection):
+def normalize_market_name(name):
 
-    """
+    name = str(name).lower().strip()
 
-    IMPORTANTE:
+    replacements = {
 
-    NO usamos predictions.goals.home/away como medias
+        "match winner": "match winner",
 
-    de Poisson.
+        "1x2": "match winner",
 
-    API-Football entrega en predictions:
+        "both teams to score": "btts",
 
-    - winner
+        "btts": "btts",
 
-    - win_or_draw
+        "goals over/under": "goals over/under",
 
-    - under_over
+        "over/under": "goals over/under",
 
-    - goals
+        "total goals": "goals over/under",
 
-    - advice
+        "double chance": "double chance",
 
-    - percent
+        "asian handicap": "asian handicap",
 
-    El campo percent corresponde al ganador:
+        "handicap": "handicap"
 
-    home / draw / away.
+    }
 
-    Para goles utilizamos la predicción under_over del
+    for key, value in replacements.items():
 
-    propio modelo solamente como filtro de dirección.
+        if key in name:
 
-    """
+            return value
 
-    if market == "winner":
-
-        percent = prediction.get("percent", {})
-
-        if selection == "Home":
-
-            return clean_percent(
-
-                percent.get("home")
-
-            )
-
-        if selection == "Draw":
-
-            return clean_percent(
-
-                percent.get("draw")
-
-            )
-
-        if selection == "Away":
-
-            return clean_percent(
-
-                percent.get("away")
-
-            )
-
-        return 0.0
-
-    if market == "goals":
-
-        under_over = str(
-
-            prediction.get("under_over", "")
-
-        ).lower().strip()
-
-        selected = selection.lower().strip()
-
-        # API predice Over 2.5
-
-        if selected == "over 2.5":
-
-            if "over 2.5" in under_over:
-
-                return 0.70
-
-            return 0.0
-
-        # API predice Under 2.5
-
-        if selected == "under 2.5":
-
-            if "under 2.5" in under_over:
-
-                return 0.70
-
-            return 0.0
-
-        # Over 1.5:
-
-        # si API predice Over 2.5, también es compatible.
-
-        if selected == "over 1.5":
-
-            if (
-
-                "over 2.5" in under_over
-
-                or "over 1.5" in under_over
-
-            ):
-
-                return 0.75
-
-            return 0.0
-
-        return 0.0
-
-    if market == "btts":
-
-        advice = str(
-
-            prediction.get("advice", "")
-
-        ).lower()
-
-        selected = selection.lower().strip()
-
-        # API-Football no proporciona un porcentaje BTTS
-
-        # independiente en predictions.
-
-        #
-
-        # No inventamos una probabilidad.
-
-        #
-
-        # Por seguridad dejamos estos mercados fuera
-
-        # hasta disponer de una fuente estadística específica.
-
-        return 0.0
-
-    return 0.0
+    return name
 
 # ============================================================
 
-# CUOTAS
+# CONVERTIR SELECCIÓN
 
 # ============================================================
 
-def find_odds(odds_item, home, away):
+def normalize_selection(selection):
 
-    candidates = []
+    return str(
 
-    for bookmaker in odds_item.get("bookmakers", []):
+        selection
+
+    ).strip()
+
+# ============================================================
+
+# EXTRAER MERCADOS
+
+# ============================================================
+
+def extract_markets(
+
+    odds_item,
+
+    home,
+
+    away
+
+):
+
+    markets = []
+
+    for bookmaker in odds_item.get(
+
+        "bookmakers",
+
+        []
+
+    ):
 
         bookmaker_name = bookmaker.get(
 
@@ -338,7 +282,13 @@ def find_odds(odds_item, home, away):
 
         )
 
-        for bet in bookmaker.get("bets", []):
+        for bet in bookmaker.get(
+
+            "bets",
+
+            []
+
+        ):
 
             market_name = bet.get(
 
@@ -348,41 +298,37 @@ def find_odds(odds_item, home, away):
 
             )
 
-            normalized = market_name.lower()
+            market_key = normalize_market_name(
 
-            for value in bet.get(
+                market_name
+
+            )
+
+            values = bet.get(
 
                 "values",
 
                 []
 
-            ):
+            )
 
-                try:
+            for value in values:
 
-                    odd = float(
+                odd = safe_float(
 
-                        value.get("odd")
+                    value.get("odd")
 
-                    )
+                )
 
-                except:
-
-                    continue
-
-                if not (
-
-                    MIN_ODD
-
-                    <= odd
-
-                    <= MAX_ODD
-
-                ):
+                if odd is None:
 
                     continue
 
-                selection = str(
+                if odd < MIN_ODD:
+
+                    continue
+
+                selection = normalize_selection(
 
                     value.get(
 
@@ -394,111 +340,665 @@ def find_odds(odds_item, home, away):
 
                 )
 
-                market = None
+                if not selection:
 
-                # -------------------------
+                    continue
 
-                # GANADOR
+                markets.append({
 
-                # -------------------------
+                    "market_name": market_name,
 
-                if "match winner" in normalized:
+                    "market_key": market_key,
 
-                    if selection == home:
+                    "selection": selection,
 
-                        selection = "Home"
+                    "odd": odd,
 
-                        market = "winner"
+                    "bookmaker": bookmaker_name,
 
-                    elif selection == away:
+                    "home": home,
 
-                        selection = "Away"
+                    "away": away
 
-                        market = "winner"
+                })
 
-                    elif (
+    return markets
 
-                        selection.lower()
+# ============================================================
 
-                        == "draw"
+# PROBABILIDAD DE CONSENSO
 
-                    ):
+# ============================================================
 
-                        selection = "Draw"
+def calculate_consensus_probability(
 
-                        market = "winner"
+    markets,
 
-                # -------------------------
+    target
 
-                # BTTS
+):
 
-                # -------------------------
+    """
 
-                elif (
+    Calcula una probabilidad de consenso
 
-                    "both teams to score"
+    usando las cuotas disponibles de varios
 
-                    in normalized
+    bookmakers.
 
-                    or normalized == "btts"
+    No se presenta como probabilidad garantizada.
 
-                ):
+    Es una estimación derivada del mercado.
 
-                    if selection.lower() in [
+    """
 
-                        "yes",
+    relevant = []
 
-                        "no"
+    target_market = target[
 
-                    ]:
+        "market_key"
 
-                        market = "btts"
+    ]
 
-                # -------------------------
+    target_selection = target[
 
-                # GOLES
+        "selection"
 
-                # -------------------------
+    ]
 
-                elif (
+    for market in markets:
 
-                    "over/under"
+        if market[
 
-                    in normalized
+            "market_key"
 
-                    or "goals over/under"
+        ] != target_market:
 
-                    in normalized
+            continue
 
-                ):
+        if market[
 
-                    if selection.lower() in [
+            "selection"
 
-                        "over 1.5",
+        ] != target_selection:
 
-                        "over 2.5",
+            continue
 
-                        "under 2.5"
+        relevant.append(
 
-                    ]:
+            market
 
-                        market = "goals"
+        )
 
-                if market:
+    if not relevant:
 
-                    candidates.append({
+        return 0.0, 0
 
-                        "market": market,
+    # Agrupar por bookmaker
 
-                        "selection": selection,
+    by_bookmaker = defaultdict(list)
 
-                        "odd": odd,
+    for market in markets:
 
-                        "bookmaker": bookmaker_name
+        if market[
 
-                    })
+            "market_key"
 
-    return candidates
+        ] != target_market:
+
+            continue
+
+        by_bookmaker[
+
+            market["bookmaker"]
+
+        ].append(
+
+            market
+
+        )
+
+    probabilities = []
+
+    for bookmaker, values in by_bookmaker.items():
+
+        target_value = None
+
+        for value in values:
+
+            if (
+
+                value["selection"]
+
+                == target_selection
+
+            ):
+
+                target_value = value
+
+                break
+
+        if not target_value:
+
+            continue
+
+        odds = []
+
+        for value in values:
+
+            odd = safe_float(
+
+                value["odd"]
+
+            )
+
+            if odd is not None:
+
+                odds.append(
+
+                    odd
+
+                )
+
+        if len(odds) < 2:
+
+            continue
+
+        # Probabilidad implícita normalizada
+
+        inverse_total = sum(
+
+            1 / odd
+
+            for odd in odds
+
+            if odd > 1
+
+        )
+
+        if inverse_total <= 0:
+
+            continue
+
+        probability = (
+
+            (1 / target_value["odd"])
+
+            / inverse_total
+
+        )
+
+        probabilities.append(
+
+            probability
+
+        )
+
+    if not probabilities:
+
+        return (
+
+            implied_probability(
+
+                target["odd"]
+
+            ),
+
+            1
+
+        )
+
+    # Promedio de consenso
+
+    probability = sum(
+
+        probabilities
+
+    ) / len(probabilities)
+
+    return (
+
+        max(
+
+            0.0,
+
+            min(
+
+                1.0,
+
+                probability
+
+            )
+
+        ),
+
+        len(probabilities)
+
+    )
+
+# ============================================================
+
+# COMPATIBILIDAD CON PREDICTION
+
+# ============================================================
+
+def prediction_alignment(
+
+    prediction,
+
+    market
+
+):
+
+    """
+
+    Devuelve:
+
+        1.0  = fuerte coincidencia
+
+        0.5  = información parcial
+
+        0.0  = sin información
+
+       -1.0  = contradicción
+
+    """
+
+    if not prediction:
+
+        return 0.0
+
+    market_key = market[
+
+        "market_key"
+
+    ]
+
+    selection = market[
+
+        "selection"
+
+    ].lower().strip()
+
+    # --------------------------------------------------------
+
+    # GANADOR
+
+    # --------------------------------------------------------
+
+    if market_key == "match winner":
+
+        winner = prediction.get(
+
+            "winner",
+
+            {}
+
+        )
+
+        winner_name = str(
+
+            winner.get(
+
+                "name",
+
+                ""
+
+            )
+
+        ).lower().strip()
+
+        if not winner_name:
+
+            return 0.0
+
+        home = market[
+
+            "home"
+
+        ].lower().strip()
+
+        away = market[
+
+            "away"
+
+        ].lower().strip()
+
+        if (
+
+            selection.lower()
+
+            == market["home"].lower()
+
+        ):
+
+            if winner_name == home:
+
+                return 1.0
+
+            return -1.0
+
+        if (
+
+            selection.lower()
+
+            == market["away"].lower()
+
+        ):
+
+            if winner_name == away:
+
+                return 1.0
+
+            return -1.0
+
+        if selection == "draw":
+
+            # Si API dice un ganador concreto,
+
+            # el empate no recibe confirmación.
+
+            return -1.0
+
+    # --------------------------------------------------------
+
+    # GOLES
+
+    # --------------------------------------------------------
+
+    if market_key == "goals over/under":
+
+        under_over = str(
+
+            prediction.get(
+
+                "under_over",
+
+                ""
+
+            )
+
+        ).lower().strip()
+
+        if not under_over:
+
+            return 0.0
+
+        if (
+
+            selection
+
+            == under_over
+
+        ):
+
+            return 1.0
+
+        # Coincidencia por dirección
+
+        if (
+
+            "over" in selection
+
+            and "over" in under_over
+
+        ):
+
+            return 1.0
+
+        if (
+
+            "under" in selection
+
+            and "under" in under_over
+
+        ):
+
+            return 1.0
+
+        return -1.0
+
+    # --------------------------------------------------------
+
+    # OTROS MERCADOS
+
+    # --------------------------------------------------------
+
+    return 0.0
+
+# ============================================================
+
+# PROBABILIDAD DE GANADOR DE API
+
+# ============================================================
+
+def api_winner_probability(
+
+    prediction,
+
+    market
+
+):
+
+    if market[
+
+        "market_key"
+
+    ] != "match winner":
+
+        return None
+
+    percent = prediction.get(
+
+        "percent",
+
+        {}
+
+    )
+
+    selection = market[
+
+        "selection"
+
+    ]
+
+    home = market[
+
+        "home"
+
+    ]
+
+    away = market[
+
+        "away"
+
+    ]
+
+    if selection == home:
+
+        return clean_percent(
+
+            percent.get(
+
+                "home"
+
+            )
+
+        )
+
+    if selection == away:
+
+        return clean_percent(
+
+            percent.get(
+
+                "away"
+
+            )
+
+        )
+
+    if selection.lower() == "draw":
+
+        return clean_percent(
+
+            percent.get(
+
+                "draw"
+
+            )
+
+        )
+
+    return None
+
+# ============================================================
+
+# CALCULAR CONFIANZA
+
+# ============================================================
+
+def calculate_confidence(
+
+    market_probability,
+
+    prediction_match,
+
+    bookmaker_count,
+
+    api_probability=None
+
+):
+
+    # Base: probabilidad del mercado
+
+    confidence = (
+
+        market_probability
+
+        * 100
+
+    )
+
+    # Más bookmakers = mayor estabilidad
+
+    if bookmaker_count >= 5:
+
+        confidence += 7
+
+    elif bookmaker_count >= 3:
+
+        confidence += 4
+
+    elif bookmaker_count >= 2:
+
+        confidence += 2
+
+    # Confirmación del modelo
+
+    if prediction_match > 0:
+
+        confidence += 8
+
+    elif prediction_match < 0:
+
+        confidence -= 12
+
+    # Para ganador tenemos además
+
+    # la probabilidad explícita de API-Football.
+
+    if api_probability is not None:
+
+        difference = (
+
+            api_probability
+
+            - market_probability
+
+        )
+
+        if difference >= 0.10:
+
+            confidence += 8
+
+        elif difference >= 0.05:
+
+            confidence += 5
+
+        elif difference <= -0.10:
+
+            confidence -= 10
+
+        elif difference <= -0.05:
+
+            confidence -= 5
+
+    confidence = max(
+
+        0,
+
+        min(
+
+            100,
+
+            confidence
+
+        )
+
+    )
+
+    return confidence
+
+# ============================================================
+
+# CLASIFICACIÓN
+
+# ============================================================
+
+def classify_confidence(
+
+    confidence
+
+):
+
+    if confidence >= VERY_HIGH_CONFIDENCE:
+
+        return (
+
+            "🟢 MUY ALTA",
+
+            "MUY ALTA"
+
+        )
+
+    if confidence >= HIGH_CONFIDENCE:
+
+        return (
+
+            "🔵 ALTA",
+
+            "ALTA"
+
+        )
+
+    if confidence >= MIN_CONFIDENCE:
+
+        return (
+
+            "🟡 BUENA",
+
+            "BUENA"
+
+        )
+
+    return (
+
+        "🔴 DESCARTADA",
+
+        "DESCARTADA"
+
+    )
 
 # ============================================================
 
@@ -532,7 +1032,7 @@ def analyze_fixture(
 
     ]["away"]["name"]
 
-    candidates = find_odds(
+    markets = extract_markets(
 
         odds_item,
 
@@ -542,9 +1042,15 @@ def analyze_fixture(
 
     )
 
-    if not candidates:
+    if not markets:
 
         return []
+
+    # --------------------------------------------------------
+
+    # PREDICTION
+
+    # --------------------------------------------------------
 
     prediction_data = api_get(
 
@@ -558,77 +1064,115 @@ def analyze_fixture(
 
     )
 
-    if not prediction_data:
+    prediction = {}
 
-        return []
+    if prediction_data:
 
-    prediction = prediction_data[0].get(
+        prediction = prediction_data[
 
-        "predictions",
+            0
 
-        {}
+        ].get(
 
-    )
+            "predictions",
+
+            {}
+
+        )
 
     results = []
 
-    for candidate in candidates:
+    # --------------------------------------------------------
 
-        probability = get_probability(
+    # ANALIZAR CADA MERCADO
+
+    # --------------------------------------------------------
+
+    for market in markets:
+
+        market_probability, bookmaker_count = (
+
+            calculate_consensus_probability(
+
+                markets,
+
+                market
+
+            )
+
+        )
+
+        if market_probability < MIN_PROBABILITY:
+
+            continue
+
+        alignment = prediction_alignment(
 
             prediction,
 
-            candidate["market"],
-
-            candidate["selection"]
+            market
 
         )
 
-        probability = max(
+        # Si el modelo contradice fuertemente
 
-            0.0,
+        # el mercado, descartamos.
 
-            min(1.0, probability)
+        if alignment < 0:
+
+            continue
+
+        api_probability = api_winner_probability(
+
+            prediction,
+
+            market
 
         )
 
-        # -------------------------
+        confidence = calculate_confidence(
 
-        # FILTRO DE PROBABILIDAD
+            market_probability,
 
-        # -------------------------
+            alignment,
 
-        if probability < MIN_PROBABILITY:
+            bookmaker_count,
+
+            api_probability
+
+        )
+
+        level_icon, level_name = (
+
+            classify_confidence(
+
+                confidence
+
+            )
+
+        )
+
+        if confidence < MIN_CONFIDENCE:
 
             continue
 
-        if probability > MAX_PROBABILITY:
-
-            continue
-
-        # -------------------------
+        # ----------------------------------------------------
 
         # VALOR
 
-        # -------------------------
+        # ----------------------------------------------------
 
-        value = calculate_value(
+        implied = implied_probability(
 
-            probability,
-
-            candidate["odd"]
+            market["odd"]
 
         )
 
-        if value < MIN_VALUE:
+        value = (
 
-            continue
+            market_probability
 
-        score = (
-
-            probability * 100
-
-            + value * 100
+            - implied
 
         )
 
@@ -640,19 +1184,51 @@ def analyze_fixture(
 
             "away": away,
 
-            "market": candidate["market"],
+            "market": market[
 
-            "selection": candidate["selection"],
+                "market_name"
 
-            "odd": candidate["odd"],
+            ],
 
-            "probability": probability,
+            "market_key": market[
+
+                "market_key"
+
+            ],
+
+            "selection": market[
+
+                "selection"
+
+            ],
+
+            "odd": market[
+
+                "odd"
+
+            ],
+
+            "probability": market_probability,
+
+            "api_probability": api_probability,
 
             "value": value,
 
-            "score": score,
+            "confidence": confidence,
 
-            "bookmaker": candidate["bookmaker"],
+            "level": level_name,
+
+            "level_icon": level_icon,
+
+            "bookmakers": bookmaker_count,
+
+            "alignment": alignment,
+
+            "bookmaker": market[
+
+                "bookmaker"
+
+            ],
 
             "date": fixture[
 
@@ -670,7 +1246,11 @@ def analyze_fixture(
 
 # ============================================================
 
-def remove_duplicates(results):
+def remove_duplicates(
+
+    results
+
+):
 
     best = {}
 
@@ -680,7 +1260,7 @@ def remove_duplicates(results):
 
             item["fixture_id"],
 
-            item["market"],
+            item["market_key"],
 
             item["selection"]
 
@@ -692,13 +1272,43 @@ def remove_duplicates(results):
 
             continue
 
-        # Conservamos la cuota más alta
+        current = best[key]
 
-        if item["odd"] > best[key]["odd"]:
+        # Primero confianza
+
+        if (
+
+            item["confidence"]
+
+            > current["confidence"]
+
+        ):
 
             best[key] = item
 
-    return list(best.values())
+        # Si confianza igual,
+
+        # conservar cuota mayor
+
+        elif (
+
+            item["confidence"]
+
+            == current["confidence"]
+
+            and item["odd"]
+
+            > current["odd"]
+
+        ):
+
+            best[key] = item
+
+    return list(
+
+        best.values()
+
+    )
 
 # ============================================================
 
@@ -792,7 +1402,7 @@ def main():
 
             "⚠️ No se encontraron cuotas "
 
-            "disponibles para analizar."
+            "disponibles."
 
         )
 
@@ -856,7 +1466,7 @@ def main():
 
     # ========================================================
 
-    # PARTIDOS CON CUOTAS VÁLIDAS
+    # CANDIDATOS
 
     # ========================================================
 
@@ -864,17 +1474,23 @@ def main():
 
     for odds_item in odds_response:
 
-        fixture_info = odds_item.get(
+        fixture_id = (
 
-            "fixture",
+            odds_item
 
-            {}
+            .get(
 
-        )
+                "fixture",
 
-        fixture_id = fixture_info.get(
+                {}
 
-            "id"
+            )
+
+            .get(
+
+                "id"
+
+            )
 
         )
 
@@ -900,7 +1516,7 @@ def main():
 
         ]["away"]["name"]
 
-        odds_candidates = find_odds(
+        markets = extract_markets(
 
             odds_item,
 
@@ -910,7 +1526,7 @@ def main():
 
         )
 
-        if odds_candidates:
+        if markets:
 
             candidates_with_odds.append(
 
@@ -934,11 +1550,11 @@ def main():
 
     # ========================================================
 
-    # PRIORIZAR CUOTAS CERCANAS A 1.70
+    # PRIORIZAR
 
     # ========================================================
 
-    def fixture_priority(item):
+    def priority(item):
 
         fixture, odds_item = item
 
@@ -954,7 +1570,7 @@ def main():
 
         ]["away"]["name"]
 
-        candidates = find_odds(
+        markets = extract_markets(
 
             odds_item,
 
@@ -964,27 +1580,31 @@ def main():
 
         )
 
-        if not candidates:
+        if not markets:
 
             return 999
+
+        # Preferimos cuotas cercanas
+
+        # al rango de alta probabilidad.
 
         return min(
 
             abs(
 
-                candidate["odd"]
+                market["odd"]
 
-                - 1.70
+                - 1.60
 
             )
 
-            for candidate in candidates
+            for market in markets
 
         )
 
     candidates_with_odds.sort(
 
-        key=fixture_priority
+        key=priority
 
     )
 
@@ -1006,7 +1626,7 @@ def main():
 
     # ========================================================
 
-    # ANALIZAR
+    # ANALISIS
 
     # ========================================================
 
@@ -1038,17 +1658,17 @@ def main():
 
                 f'{fixture["teams"]["home"]["name"]} '
 
-                "vs "
+                f'vs '
 
                 f'{fixture["teams"]["away"]["name"]}: '
 
-                f"{error}"
+                f'{error}'
 
             )
 
     # ========================================================
 
-    # QUITAR DUPLICADOS
+    # DEDUPLICAR
 
     # ========================================================
 
@@ -1060,13 +1680,21 @@ def main():
 
     # ========================================================
 
-    # ORDENAR
+    # ORDENAR POR CONFIANZA
 
     # ========================================================
 
     all_candidates.sort(
 
-        key=lambda x: x["score"],
+        key=lambda x: (
+
+            x["confidence"],
+
+            x["probability"],
+
+            x["value"]
+
+        ),
 
         reverse=True
 
@@ -1082,6 +1710,28 @@ def main():
 
     )
 
+    # Mostrar diagnóstico
+
+    for pick in all_candidates[:10]:
+
+        print(
+
+            f'{pick["home"]} vs '
+
+            f'{pick["away"]} | '
+
+            f'{pick["selection"]} | '
+
+            f'Cuota {pick["odd"]:.2f} | '
+
+            f'Prob {pick["probability"]:.1%} | '
+
+            f'Confianza {pick["confidence"]:.1f} | '
+
+            f'{pick["level"]}'
+
+        )
+
     # ========================================================
 
     # SIN APUESTAS
@@ -1090,7 +1740,7 @@ def main():
 
     if not all_candidates:
 
-        message = (
+        telegram(
 
             "🤖 BOT DE APUESTAS\n\n"
 
@@ -1098,45 +1748,45 @@ def main():
 
             "❌ No encontré apuestas "
 
-            "que cumplan todos los filtros.\n\n"
+            "con suficiente confianza.\n\n"
 
-            f"💰 Cuotas: "
+            f"💰 Cuota mínima: "
 
-            f"{MIN_ODD:.2f}–{MAX_ODD:.2f}\n"
+            f"{MIN_ODD:.2f}\n"
 
-            f"📊 Probabilidad: "
+            f"📊 Probabilidad mínima: "
 
-            f"{MIN_PROBABILITY:.0%}"
+            f"{MIN_PROBABILITY:.0%}\n"
 
-            f"–{MAX_PROBABILITY:.0%}\n"
+            f"⭐ Confianza mínima: "
 
-            f"📈 Valor mínimo: "
-
-            f"{MIN_VALUE:.0%}\n\n"
-
-            f"Partidos con cuotas: "
-
-            f"{len(candidates_with_odds)}\n"
-
-            f"Predictions analizadas: "
-
-            f"{len(selected)}\n\n"
+            f"{MIN_CONFIDENCE}/100\n\n"
 
             "No se fuerza ninguna apuesta."
 
         )
 
-        telegram(message)
-
         return
 
     # ========================================================
 
-    # APUESTA PRINCIPAL
+    # ALERTAS
 
     # ========================================================
 
-    best = all_candidates[0]
+    selected_alerts = all_candidates[
+
+        :MAX_ALERTS
+
+    ]
+
+    # ========================================================
+
+    # PRINCIPAL
+
+    # ========================================================
+
+    best = selected_alerts[0]
 
     match_time = datetime.fromisoformat(
 
@@ -1156,7 +1806,7 @@ def main():
 
     message = (
 
-        "🔥 APUESTA PRINCIPAL DEL DÍA\n\n"
+        "🔥 APUESTA PRINCIPAL\n\n"
 
         f"⚽ {best['home']} vs "
 
@@ -1172,77 +1822,121 @@ def main():
 
         f"💰 Cuota: "
 
-        f"{best['odd']:.2f}\n"
+        f"{best['odd']:.2f}\n\n"
 
-        f"📊 Probabilidad estimada: "
+        f"📊 Probabilidad consenso: "
 
         f"{best['probability']:.1%}\n"
 
-        f"📈 Valor: "
+        f"⭐ Confianza: "
+
+        f"{best['confidence']:.0f}/100 "
+
+        f"{best['level_icon']}\n"
+
+        f"📈 Valor estimado: "
 
         f"{best['value']:.1%}\n"
 
-        f"🏦 {best['bookmaker']}\n"
+        f"🏦 Mejor cuota: "
+
+        f"{best['bookmaker']}\n"
+
+        f"🔎 Bookmakers comparados: "
+
+        f"{best['bookmakers']}\n"
 
         f"🕐 Hora Honduras: "
 
-        f"{match_time.strftime('%H:%M')}\n\n"
-
-        "⭐ MAYOR CONFIANZA DEL DÍA"
+        f"{match_time.strftime('%H:%M')}\n"
 
     )
 
-    telegram(message)
+    if best["api_probability"] is not None:
 
-    # ========================================================
+        message += (
 
-    # OTRAS APUESTAS
+            f"\n🤖 Prob. API-Football: "
 
-    # ========================================================
-
-    if len(all_candidates) > 1:
-
-        extra = (
-
-            "\n🔥 OTRAS APUESTAS "
-
-            "DE ALTA CONFIANZA\n"
+            f"{best['api_probability']:.1%}"
 
         )
 
-        for pick in all_candidates[
+    message += (
 
-            1:MAX_ALERTS
+        "\n\n"
 
-        ]:
+        "⚠️ Alta confianza estadística, "
+
+        "no garantía de acierto."
+
+    )
+
+    telegram(
+
+        message
+
+    )
+
+    # ========================================================
+
+    # OTRAS
+
+    # ========================================================
+
+    if len(selected_alerts) > 1:
+
+        extra = (
+
+            "🔥 OTRAS OPORTUNIDADES\n"
+
+        )
+
+        for index, pick in enumerate(
+
+            selected_alerts[1:],
+
+            start=2
+
+        ):
 
             extra += (
 
-                f"\n⚽ {pick['home']} "
+                f"\n{index}. "
 
-                f"vs {pick['away']}\n"
+                f"{pick['level_icon']} "
 
-                f"🎯 {pick['selection']}\n"
+                f"{pick['home']} vs "
 
-                f"💰 Cuota "
+                f"{pick['away']}\n"
+
+                f"🎯 {pick['market']}: "
+
+                f"{pick['selection']}\n"
+
+                f"💰 Cuota: "
 
                 f"{pick['odd']:.2f}\n"
 
-                f"📊 Prob. "
+                f"📊 Prob.: "
 
                 f"{pick['probability']:.1%}\n"
 
-                f"📈 Valor "
+                f"⭐ Confianza: "
 
-                f"{pick['value']:.1%}\n"
+                f"{pick['confidence']:.0f}/100\n"
 
             )
 
-        telegram(extra)
+        telegram(
+
+            extra
+
+        )
 
 # ============================================================
 
-# EJECUCIÓN
+# EJECUTAR
 
 # ============================================================
 
