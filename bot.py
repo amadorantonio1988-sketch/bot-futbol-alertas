@@ -22,6 +22,12 @@ MIN_PROBABILITY = 0.62
 
 MIN_VALUE = 0.05
 
+# Máximo de partidos a analizar con predictions por ejecución.
+
+# Evita consumir rápidamente la cuota de API-Football.
+
+MAX_PREDICTIONS = 20
+
 def api_get(endpoint, params=None):
 
     headers = {"x-apisports-key": API_KEY}
@@ -37,6 +43,10 @@ def api_get(endpoint, params=None):
         timeout=30
 
     )
+
+    if response.status_code == 429:
+
+        raise Exception("API-Football: límite de solicitudes alcanzado (429)")
 
     response.raise_for_status()
 
@@ -78,7 +88,13 @@ def probability_over(lam, line):
 
     max_goals = int(math.floor(line))
 
-    under = sum(poisson_probability(lam, g) for g in range(max_goals + 1))
+    under = sum(
+
+        poisson_probability(lam, g)
+
+        for g in range(max_goals + 1)
+
+    )
 
     return 1 - under
 
@@ -98,15 +114,27 @@ def get_probability(prediction, market, selection):
 
         if selection == "Home":
 
-            return float(percent.get("home", "0").replace("%", "")) / 100
+            return float(
+
+                percent.get("home", "0").replace("%", "")
+
+            ) / 100
 
         if selection == "Draw":
 
-            return float(percent.get("draw", "0").replace("%", "")) / 100
+            return float(
+
+                percent.get("draw", "0").replace("%", "")
+
+            ) / 100
 
         if selection == "Away":
 
-            return float(percent.get("away", "0").replace("%", "")) / 100
+            return float(
+
+                percent.get("away", "0").replace("%", "")
+
+            ) / 100
 
     goals = prediction.get("goals", {})
 
@@ -140,9 +168,23 @@ def get_probability(prediction, market, selection):
 
     if market == "btts":
 
-        p = probability_btts(home_goals, away_goals)
+        p = probability_btts(
 
-        if selection.lower() in ["yes", "btts yes", "both teams to score - yes"]:
+            home_goals,
+
+            away_goals
+
+        )
+
+        if selection.lower() in [
+
+            "yes",
+
+            "btts yes",
+
+            "both teams to score - yes"
+
+        ]:
 
             return p
 
@@ -150,25 +192,31 @@ def get_probability(prediction, market, selection):
 
     return 0
 
-def find_odds(odds_data, home, away):
+def find_odds(odds_item, home, away):
 
     candidates = []
 
-    for bookmaker in odds_data:
+    for bookmaker in odds_item.get("bookmakers", []):
 
-        bookmaker_name = bookmaker.get("bookmaker", {}).get("name", "Bookmaker")
+        bookmaker_name = bookmaker.get(
+
+            "name",
+
+            "Bookmaker"
+
+        )
 
         for bet in bookmaker.get("bets", []):
 
             market_name = bet.get("name", "")
 
-            for value in bet.get("values", []):
+            normalized = market_name.lower()
 
-                odd_text = value.get("odd")
+            for value in bet.get("values", []):
 
                 try:
 
-                    odd = float(odd_text)
+                    odd = float(value.get("odd"))
 
                 except:
 
@@ -178,11 +226,13 @@ def find_odds(odds_data, home, away):
 
                     continue
 
-                selection = str(value.get("value", ""))
+                selection = str(
+
+                    value.get("value", "")
+
+                )
 
                 market = None
-
-                normalized = market_name.lower()
 
                 if "match winner" in normalized:
 
@@ -204,15 +254,41 @@ def find_odds(odds_data, home, away):
 
                         market = "winner"
 
-                elif normalized in ["both teams to score", "btts"]:
+                elif normalized in [
 
-                    if selection.lower() in ["yes", "no"]:
+                    "both teams to score",
+
+                    "btts"
+
+                ]:
+
+                    if selection.lower() in [
+
+                        "yes",
+
+                        "no"
+
+                    ]:
 
                         market = "btts"
 
-                elif "over/under" in normalized or "goals over/under" in normalized:
+                elif (
 
-                    if selection.lower() in ["over 1.5", "over 2.5", "under 2.5"]:
+                    "over/under" in normalized
+
+                    or "goals over/under" in normalized
+
+                ):
+
+                    if selection.lower() in [
+
+                        "over 1.5",
+
+                        "over 2.5",
+
+                        "under 2.5"
+
+                    ]:
 
                         market = "goals"
 
@@ -232,13 +308,29 @@ def find_odds(odds_data, home, away):
 
     return candidates
 
-def analyze_fixture(fixture):
+def analyze_fixture(fixture, odds_item):
 
     fixture_id = fixture["fixture"]["id"]
 
     home = fixture["teams"]["home"]["name"]
 
     away = fixture["teams"]["away"]["name"]
+
+    candidates = find_odds(
+
+        odds_item,
+
+        home,
+
+        away
+
+    )
+
+    if not candidates:
+
+        return []
+
+    # Solo ahora hacemos la consulta costosa de predictions.
 
     prediction_data = api_get(
 
@@ -252,27 +344,11 @@ def analyze_fixture(fixture):
 
         return []
 
-    prediction = prediction_data[0].get("predictions", {})
+    prediction = prediction_data[0].get(
 
-    odds_data = api_get(
+        "predictions",
 
-        "odds",
-
-        {"fixture": fixture_id}
-
-    )
-
-    if not odds_data:
-
-        return []
-
-    candidates = find_odds(
-
-        odds_data,
-
-        home,
-
-        away
+        {}
 
     )
 
@@ -296,13 +372,25 @@ def analyze_fixture(fixture):
 
         implied_probability = 1 / candidate["odd"]
 
-        value = probability - implied_probability
+        value = (
+
+            probability -
+
+            implied_probability
+
+        )
 
         if value < MIN_VALUE:
 
             continue
 
-        score = probability * 100 + value * 100
+        score = (
+
+            probability * 100 +
+
+            value * 100
+
+        )
 
         results.append({
 
@@ -346,9 +434,73 @@ def main():
 
         raise Exception("Falta TELEGRAM_CHAT_ID")
 
-    honduras = timezone(timedelta(hours=-6))
+    honduras = timezone(
 
-    today = datetime.now(honduras).strftime("%Y-%m-%d")
+        timedelta(hours=-6)
+
+    )
+
+    today = datetime.now(
+
+        honduras
+
+    ).strftime("%Y-%m-%d")
+
+    print(f"Fecha Honduras: {today}")
+
+    # --------------------------------------------------
+
+    # 1. UNA SOLA CONSULTA PARA LAS CUOTAS DEL DÍA
+
+    # --------------------------------------------------
+
+    print("Buscando cuotas del día...")
+
+    odds_response = api_get(
+
+        "odds",
+
+        {
+
+            "date": today
+
+        }
+
+    )
+
+    print(
+
+        f"Partidos con cuotas encontrados: "
+
+        f"{len(odds_response)}"
+
+    )
+
+    if not odds_response:
+
+        message = (
+
+            "🤖 BOT DE APUESTAS\n\n"
+
+            f"📅 {today}\n\n"
+
+            "⚠️ No se encontraron cuotas "
+
+            "disponibles para analizar."
+
+        )
+
+        telegram(message)
+
+        return
+
+    # --------------------------------------------------
+
+    # 2. OBTENER FIXTURES DEL DÍA
+
+    # --------------------------------------------------
+
+    print("Buscando partidos del día...")
 
     fixtures = api_get(
 
@@ -362,27 +514,217 @@ def main():
 
     )
 
-    future_matches = []
+    fixture_map = {}
 
     for fixture in fixtures:
 
-        status = fixture["fixture"]["status"]["short"]
+        status = fixture[
 
-        if status not in ["NS", "TBD"]:
+            "fixture"
+
+        ]["status"]["short"]
+
+        if status not in [
+
+            "NS",
+
+            "TBD"
+
+        ]:
 
             continue
 
-        future_matches.append(fixture)
+        fixture_id = fixture[
+
+            "fixture"
+
+        ]["id"]
+
+        fixture_map[fixture_id] = fixture
+
+    # --------------------------------------------------
+
+    # 3. UNIR CUOTAS + PARTIDOS
+
+    # --------------------------------------------------
+
+    candidates_with_odds = []
+
+    for odds_item in odds_response:
+
+        fixture_info = odds_item.get(
+
+            "fixture",
+
+            {}
+
+        )
+
+        fixture_id = fixture_info.get(
+
+            "id"
+
+        )
+
+        if fixture_id not in fixture_map:
+
+            continue
+
+        fixture = fixture_map[
+
+            fixture_id
+
+        ]
+
+        home = fixture[
+
+            "teams"
+
+        ]["home"]["name"]
+
+        away = fixture[
+
+            "teams"
+
+        ]["away"]["name"]
+
+        odds_candidates = find_odds(
+
+            odds_item,
+
+            home,
+
+            away
+
+        )
+
+        if odds_candidates:
+
+            candidates_with_odds.append(
+
+                (
+
+                    fixture,
+
+                    odds_item
+
+                )
+
+            )
+
+    print(
+
+        "Partidos candidatos por cuota: "
+
+        f"{len(candidates_with_odds)}"
+
+    )
+
+    # --------------------------------------------------
+
+    # 4. PRIORIZAR PARTIDOS
+
+    # --------------------------------------------------
+
+    # Primero analizamos partidos con cuotas
+
+    # dentro del rango más interesante.
+
+    #
+
+    # Ordenamos por proximidad a la zona
+
+    # 1.55-1.80.
+
+    def fixture_priority(item):
+
+        fixture, odds_item = item
+
+        home = fixture[
+
+            "teams"
+
+        ]["home"]["name"]
+
+        away = fixture[
+
+            "teams"
+
+        ]["away"]["name"]
+
+        odds_candidates = find_odds(
+
+            odds_item,
+
+            home,
+
+            away
+
+        )
+
+        if not odds_candidates:
+
+            return 999
+
+        best_distance = min(
+
+            abs(
+
+                candidate["odd"] - 1.70
+
+            )
+
+            for candidate in odds_candidates
+
+        )
+
+        return best_distance
+
+    candidates_with_odds.sort(
+
+        key=fixture_priority
+
+    )
+
+    # --------------------------------------------------
+
+    # 5. SOLO MAX_PREDICTIONS PREDICTIONS
+
+    # --------------------------------------------------
+
+    selected = candidates_with_odds[
+
+        :MAX_PREDICTIONS
+
+    ]
+
+    print(
+
+        "Partidos que serán analizados "
+
+        f"con predictions: {len(selected)}"
+
+    )
 
     all_candidates = []
 
-    for fixture in future_matches:
+    for fixture, odds_item in selected:
 
         try:
 
-            results = analyze_fixture(fixture)
+            results = analyze_fixture(
 
-            all_candidates.extend(results)
+                fixture,
+
+                odds_item
+
+            )
+
+            all_candidates.extend(
+
+                results
+
+            )
 
         except Exception as error:
 
@@ -392,9 +734,17 @@ def main():
 
                 f'{fixture["teams"]["home"]["name"]} vs '
 
-                f'{fixture["teams"]["away"]["name"]}: {error}'
+                f'{fixture["teams"]["away"]["name"]}: '
+
+                f"{error}"
 
             )
+
+    # --------------------------------------------------
+
+    # 6. ORDENAR RESULTADOS
+
+    # --------------------------------------------------
 
     all_candidates.sort(
 
@@ -404,6 +754,12 @@ def main():
 
     )
 
+    # --------------------------------------------------
+
+    # 7. ENVIAR RESULTADO A TELEGRAM
+
+    # --------------------------------------------------
+
     if not all_candidates:
 
         message = (
@@ -412,11 +768,23 @@ def main():
 
             f"📅 {today}\n\n"
 
-            "❌ No encontré apuestas que cumplan todos los filtros.\n\n"
+            "❌ No encontré apuestas que "
+
+            "cumplan todos los filtros.\n\n"
 
             f"Cuotas: {MIN_ODD:.2f}–{MAX_ODD:.2f}\n"
 
-            f"Probabilidad mínima: {MIN_PROBABILITY:.0%}\n"
+            f"Probabilidad mínima: "
+
+            f"{MIN_PROBABILITY:.0%}\n"
+
+            f"Partidos con cuotas: "
+
+            f"{len(candidates_with_odds)}\n"
+
+            f"Predicciones analizadas: "
+
+            f"{len(selected)}\n\n"
 
             "No se fuerza ninguna apuesta."
 
@@ -432,17 +800,27 @@ def main():
 
         "🔥 APUESTA PRINCIPAL DEL DÍA\n\n"
 
-        f"⚽ {best['home']} vs {best['away']}\n\n"
+        f"⚽ {best['home']} vs "
+
+        f"{best['away']}\n\n"
 
         f"🎯 Mercado: {best['market']}\n"
 
-        f"✅ Selección: {best['selection']}\n"
+        f"✅ Selección: "
 
-        f"💰 Cuota: {best['odd']:.2f}\n"
+        f"{best['selection']}\n"
 
-        f"📊 Probabilidad estimada: {best['probability']:.1%}\n"
+        f"💰 Cuota: "
 
-        f"📈 Valor: {best['value']:.1%}\n"
+        f"{best['odd']:.2f}\n"
+
+        f"📊 Probabilidad estimada: "
+
+        f"{best['probability']:.1%}\n"
+
+        f"📈 Valor: "
+
+        f"{best['value']:.1%}\n"
 
         f"🏦 {best['bookmaker']}\n"
 
@@ -450,13 +828,21 @@ def main():
 
     match_time = datetime.fromisoformat(
 
-        best["date"].replace("Z", "+00:00")
+        best["date"].replace(
+
+            "Z",
+
+            "+00:00"
+
+        )
 
     ).astimezone(honduras)
 
     message += (
 
-        f"🕐 Hora Honduras: {match_time.strftime('%H:%M')}\n\n"
+        f"🕐 Hora Honduras: "
+
+        f"{match_time.strftime('%H:%M')}\n\n"
 
         "⭐ MAYOR CONFIANZA DEL DÍA"
 
@@ -466,19 +852,31 @@ def main():
 
     if len(all_candidates) > 1:
 
-        extra = "\n\n🔥 OTRAS APUESTAS DE ALTA CONFIANZA\n"
+        extra = (
+
+            "\n\n🔥 OTRAS APUESTAS "
+
+            "DE ALTA CONFIANZA\n"
+
+        )
 
         for pick in all_candidates[1:6]:
 
             extra += (
 
-                f"\n⚽ {pick['home']} vs {pick['away']}\n"
+                f"\n⚽ {pick['home']} vs "
+
+                f"{pick['away']}\n"
 
                 f"🎯 {pick['selection']}\n"
 
-                f"💰 Cuota {pick['odd']:.2f}\n"
+                f"💰 Cuota "
 
-                f"📊 Prob. {pick['probability']:.1%}\n"
+                f"{pick['odd']:.2f}\n"
+
+                f"📊 Prob. "
+
+                f"{pick['probability']:.1%}\n"
 
             )
 
