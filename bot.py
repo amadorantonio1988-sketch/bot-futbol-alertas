@@ -2,557 +2,465 @@
 
 import os
 
-import math
+import csv
 
 import time
 
 import requests
 
-from datetime import datetime, timezone
+from datetime import datetime
 
-from zoneinfo import ZoneInfo
+from pathlib import Path
 
-# ============================================================
+API_URL = "https://v3.football.api-sports.io"
 
-# ESCANER DE FUTBOL - API-FOOTBALL + TELEGRAM
+API_KEY = os.getenv("API_FOOTBALL_KEY", "")
 
-# Selecciona el mejor mercado disponible por partido.
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
-# ============================================================
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-API_KEY = os.getenv("API_FOOTBALL_KEY")
+MIN_HIT_RATE = 0.75
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MIN_SAMPLE = 6
 
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+MAX_LINES = 4
 
-BASE_URL = "https://v3.football.api-sports.io"
-
-LOCAL_TZ = ZoneInfo("America/Tegucigalpa")
-
-# Proteccion del plan API
-
-MAX_API_CALLS = 18
-
-SAFETY_REMAINING = 8
-
-MAX_FIXTURES = 4
-
-MAX_ALERTS = 5
-
-REQUEST_PAUSE = 0.25
-
-# Filtros de seleccion
-
-MIN_ODD = 1.50
-
-MAX_ODD = 3.50
-
-MIN_PROB = 0.60
-
-MIN_EDGE = 0.025
-
-MIN_EV = 0.03
-
-MIN_TEAM_MATCHES = 4
+DELAY = 0.5
 
 session = requests.Session()
 
-session.headers.update({
+session.headers.update({"x-apisports-key": API_KEY})
 
-    "x-apisports-key": API_KEY or "",
+cache = {}
 
-    "Accept": "application/json",
+requests_used = 0
 
-})
+def api_get(endpoint, params):
 
-api_calls = 0
+    global requests_used
 
-daily_remaining = None
+    key = (endpoint, tuple(sorted(params.items())))
 
-def now_local():
+    if key in cache:
 
-    return datetime.now(timezone.utc).astimezone(LOCAL_TZ)
+        return cache[key]
 
-def api_get(endpoint, params=None):
+    response = session.get(
 
-    global api_calls, daily_remaining
+        f"{API_URL}/{endpoint}",
 
-    if api_calls >= MAX_API_CALLS:
+        params=params,
 
-        raise RuntimeError("Limite de seguridad de llamadas API alcanzado.")
+        timeout=25
 
-    if daily_remaining is not None and daily_remaining <= SAFETY_REMAINING:
+    )
 
-        raise RuntimeError(
+    requests_used += 1
 
-            f"Quedan {daily_remaining} llamadas API. "
+    time.sleep(DELAY)
 
-            "Se detiene para proteger el limite diario."
+    if response.status_code == 429:
 
-        )
+        raise RuntimeError("Limite diario de API-Football alcanzado.")
 
-    try:
+    response.raise_for_status()
 
-        r = session.get(
-
-            BASE_URL + endpoint,
-
-            params=params or {},
-
-            timeout=20
-
-        )
-
-    except requests.RequestException as e:
-
-        raise RuntimeError(f"Error de conexion API-Football: {e}")
-
-    api_calls += 1
-
-    remaining = r.headers.get("x-ratelimit-requests-remaining")
-
-    if remaining is not None:
-
-        try:
-
-            daily_remaining = int(remaining)
-
-        except ValueError:
-
-            pass
-
-    if r.status_code == 429:
-
-        raise RuntimeError("API-Football alcanzo el limite de solicitudes.")
-
-    if r.status_code >= 400:
-
-        raise RuntimeError(f"API-Football HTTP {r.status_code}: {r.text[:200]}")
-
-    try:
-
-        data = r.json()
-
-    except ValueError:
-
-        raise RuntimeError("Respuesta JSON no valida.")
+    data = response.json()
 
     if data.get("errors"):
 
         raise RuntimeError(str(data["errors"]))
 
-    time.sleep(REQUEST_PAUSE)
+    cache[key] = data.get("response", [])
 
-    return data
+    return cache[key]
 
-def telegram(message):
+def send_telegram(message):
 
-    if not TELEGRAM_TOKEN or not CHAT_ID:
+    if not TG_TOKEN or not TG_CHAT_ID:
 
         print("Telegram no configurado.")
 
+        print(message)
+
         return
 
-    try:
+    response = requests.post(
 
-        r = requests.post(
+        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
 
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={
 
-            json={
+            "chat_id": TG_CHAT_ID,
 
-                "chat_id": CHAT_ID,
+            "text": message
 
-                "text": message,
+        },
 
-                "parse_mode": "HTML",
+        timeout=20
 
-                "disable_web_page_preview": True,
+    )
 
-            },
+    response.raise_for_status()
 
-            timeout=15,
+def find_team(name, season):
 
-        )
+    results = api_get(
 
-        if r.status_code >= 400:
+        "teams",
 
-            print("Error Telegram:", r.status_code, r.text[:200])
+        {"search": name, "season": season}
 
-    except requests.RequestException as e:
+    )
 
-        print("Error Telegram:", e)
+    exact = [
 
-def safe_float(value):
+        item for item in results
 
-    try:
+        if item["team"]["name"].lower() == name.lower()
 
-        if value is None:
+    ]
 
-            return None
+    if exact:
 
-        return float(str(value).replace("%", "").strip())
+        return exact[0]["team"]["id"]
 
-    except (TypeError, ValueError):
+    if results:
 
-        return None
+        return results[0]["team"]["id"]
 
-def poisson(k, lam):
+    raise RuntimeError(f"Equipo no encontrado: {name}")
 
-    if lam <= 0:
+def recent_fixtures(team_id, season, venue):
 
-        return 1.0 if k == 0 else 0.0
+    fixtures = api_get(
 
-    return math.exp(-lam) * lam ** k / math.factorial(k)
+        "fixtures",
 
-def poisson_probs(home_xg, away_xg, max_goals=10):
+        {
 
-    home = [poisson(k, home_xg) for k in range(max_goals + 1)]
+            "team": team_id,
 
-    away = [poisson(k, away_xg) for k in range(max_goals + 1)]
+            "season": season,
 
-    p_home = p_draw = p_away = 0.0
+            "last": 20
 
-    p_over15 = p_over25 = p_btts = 0.0
+        }
 
-    total = 0.0
+    )
 
-    for h in range(max_goals + 1):
+    selected = []
 
-        for a in range(max_goals + 1):
+    for item in fixtures:
 
-            p = home[h] * away[a]
-
-            total += p
-
-            if h > a:
-
-                p_home += p
-
-            elif h == a:
-
-                p_draw += p
-
-            else:
-
-                p_away += p
-
-            if h + a >= 2:
-
-                p_over15 += p
-
-            if h + a >= 3:
-
-                p_over25 += p
-
-            if h >= 1 and a >= 1:
-
-                p_btts += p
-
-    if total:
-
-        p_home /= total
-
-        p_draw /= total
-
-        p_away /= total
-
-        p_over15 /= total
-
-        p_over25 /= total
-
-        p_btts /= total
-
-    return {
-
-        "home": p_home,
-
-        "draw": p_draw,
-
-        "away": p_away,
-
-        "over15": p_over15,
-
-        "under15": 1 - p_over15,
-
-        "over25": p_over25,
-
-        "under25": 1 - p_over25,
-
-        "btts": p_btts,
-
-        "nobtts": 1 - p_btts,
-
-    }
-
-def fixture_name(f):
-
-    teams = f.get("teams", {})
-
-    home = teams.get("home", {}).get("name", "?")
-
-    away = teams.get("away", {}).get("name", "?")
-
-    return f"{home} vs {away}"
-
-def completed_rows(fixtures, team_id, venue=None):
-
-    rows = []
-
-    for f in fixtures:
-
-        status = f.get("fixture", {}).get("status", {}).get("short")
+        status = item["fixture"]["status"]["short"]
 
         if status not in ("FT", "AET", "PEN"):
 
             continue
 
-        teams = f.get("teams", {})
+        is_home = (
 
-        home_id = teams.get("home", {}).get("id")
+            item["teams"]["home"]["id"] == team_id
 
-        away_id = teams.get("away", {}).get("id")
+        )
 
-        if venue == "home" and home_id != team_id:
-
-            continue
-
-        if venue == "away" and away_id != team_id:
+        if venue == "home" and not is_home:
 
             continue
 
-        goals = f.get("goals", {})
+        if venue == "away" and is_home:
 
-        if home_id == team_id:
+            continue
 
-            gf, ga = goals.get("home"), goals.get("away")
+        selected.append(item)
 
-        elif away_id == team_id:
+    selected.sort(
 
-            gf, ga = goals.get("away"), goals.get("home")
+        key=lambda item: item["fixture"]["date"],
+
+        reverse=True
+
+    )
+
+    return selected[:10]
+
+def get_shots(fixture_id, team_id, market):
+
+    data = api_get(
+
+        "fixtures/statistics",
+
+        {"fixture": fixture_id}
+
+    )
+
+    wanted = (
+
+        "Total Shots"
+
+        if market == "shots"
+
+        else "Shots on Goal"
+
+    )
+
+    for team_data in data:
+
+        if team_data["team"]["id"] != team_id:
+
+            continue
+
+        for stat in team_data.get("statistics", []):
+
+            if stat["type"].lower() == wanted.lower():
+
+                value = stat["value"]
+
+                if value is None:
+
+                    return None
+
+                try:
+
+                    return float(
+
+                        str(value).replace("%", "")
+
+                    )
+
+                except ValueError:
+
+                    return None
+
+    return None
+
+def collect_values(fixtures, team_id, market):
+
+    values = []
+
+    for fixture in fixtures:
+
+        fixture_id = fixture["fixture"]["id"]
+
+        value = get_shots(
+
+            fixture_id,
+
+            team_id,
+
+            market
+
+        )
+
+        if value is not None:
+
+            values.append(value)
+
+    return values
+
+def evaluate(values, line, direction):
+
+    if not values:
+
+        return 0, 0, 0
+
+    if direction == "over":
+
+        hits = sum(value > line for value in values)
+
+    else:
+
+        hits = sum(value < line for value in values)
+
+    return hits / len(values), sum(values) / len(values), len(values)
+
+def analyze(row):
+
+    date = datetime.strptime(
+
+        row["date"], "%Y-%m-%d"
+
+    )
+
+    season = int(row.get("season") or date.year)
+
+    home = row["home_team"].strip()
+
+    away = row["away_team"].strip()
+
+    team = row["team"].strip()
+
+    if team.lower() == home.lower():
+
+        venue = "home"
+
+        opponent = away
+
+    elif team.lower() == away.lower():
+
+        venue = "away"
+
+        opponent = home
+
+    else:
+
+        raise RuntimeError(
+
+            "El equipo analizado no coincide con el local o visitante."
+
+        )
+
+    market = row["market"].strip().lower()
+
+    if market in ("shots", "remates", "total shots"):
+
+        market = "shots"
+
+        label = "remates totales"
+
+    elif market in ("sot", "remates a puerta", "shots on target"):
+
+        market = "sot"
+
+        label = "remates a puerta"
+
+    else:
+
+        raise RuntimeError("Mercado debe ser shots o sot.")
+
+    direction = row["direction"].strip().lower()
+
+    if direction not in ("over", "under"):
+
+        raise RuntimeError("direction debe ser over o under.")
+
+    line = float(row["line"])
+
+    odds = float(row["odds"])
+
+    team_id = find_team(team, season)
+
+    opponent_id = find_team(opponent, season)
+
+    fixtures = recent_fixtures(
+
+        team_id, season, venue
+
+    )
+
+    own_values = collect_values(
+
+        fixtures, team_id, market
+
+    )
+
+    opponent_venue = (
+
+        "away" if venue == "home" else "home"
+
+    )
+
+    opponent_fixtures = recent_fixtures(
+
+        opponent_id, season, opponent_venue
+
+    )
+
+    allowed_values = []
+
+    for fixture in opponent_fixtures:
+
+        fixture_id = fixture["fixture"]["id"]
+
+        if opponent_venue == "away":
+
+            rival_id = fixture["teams"]["home"]["id"]
 
         else:
 
-            continue
+            rival_id = fixture["teams"]["away"]["id"]
 
-        if gf is not None and ga is not None:
+        value = get_shots(
 
-            rows.append((int(gf), int(ga)))
+            fixture_id, rival_id, market
 
-    return rows
+        )
 
-def mean_goals(rows):
+        if value is not None:
 
-    if not rows:
+            allowed_values.append(value)
 
-        return None
+    own_rate, average, sample = evaluate(
 
-    gf = sum(x for x, _ in rows) / len(rows)
+        own_values, line, direction
 
-    ga = sum(y for _, y in rows) / len(rows)
+    )
 
-    return gf, ga
+    rival_rate, _, rival_sample = evaluate(
 
-def get_team_rows(team_id, venue):
+        allowed_values, line, direction
 
-    data = api_get("/fixtures", {"team": team_id, "last": 10})
+    )
 
-    fixtures = data.get("response", [])
+    if sample == 0:
 
-    all_rows = completed_rows(fixtures, team_id)
+        estimate = 0
 
-    venue_rows = completed_rows(fixtures, team_id, venue)
+    elif rival_sample:
 
-    if len(venue_rows) >= MIN_TEAM_MATCHES:
+        estimate = (
 
-        return venue_rows, "local/visitante"
+            0.70 * own_rate +
 
-    if len(all_rows) >= MIN_TEAM_MATCHES:
+            0.30 * rival_rate
 
-        return all_rows, "forma general"
+        )
 
-    return [], "muestra insuficiente"
+    else:
 
-def parse_percent(value):
+        estimate = own_rate
 
-    v = safe_float(value)
+    qualified = (
 
-    if v is None:
+        sample >= MIN_SAMPLE and
 
-        return None
+        estimate >= MIN_HIT_RATE
 
-    return max(0.0, min(1.0, v / 100.0))
+    )
 
-def get_api_prediction(fixture_id):
+    return {
 
-    data = api_get("/predictions", {"fixture": fixture_id})
+        "home": home,
 
-    response = data.get("response", [])
+        "away": away,
 
-    if not response:
+        "team": team,
 
-        return None
+        "market": label,
 
-    percent = response[0].get("predictions", {}).get("percent", {})
+        "direction": direction,
 
-    result = {
+        "line": line,
 
-        "home": parse_percent(percent.get("home")),
+        "odds": odds,
 
-        "draw": parse_percent(percent.get("draw")),
+        "sample": sample,
 
-        "away": parse_percent(percent.get("away")),
+        "average": average,
+
+        "own_rate": own_rate,
+
+        "rival_rate": rival_rate,
+
+        "rival_sample": rival_sample,
+
+        "estimate": estimate,
+
+        "qualified": qualified
 
     }
-
-    if any(v is None for v in result.values()):
-
-        return None
-
-    total = sum(result.values())
-
-    if total <= 0:
-
-        return None
-
-    return {k: v / total for k, v in result.items()}
-
-def model_probabilities(home_rows, away_rows, api_probs=None):
-
-    home_avg = mean_goals(home_rows)
-
-    away_avg = mean_goals(away_rows)
-
-    if home_avg is None or away_avg is None:
-
-        return None, None
-
-    if len(home_rows) < MIN_TEAM_MATCHES:
-
-        return None, None
-
-    if len(away_rows) < MIN_TEAM_MATCHES:
-
-        return None, None
-
-    home_gf, home_ga = home_avg
-
-    away_gf, away_ga = away_avg
-
-    # Estimacion simple: ataque propio y goles concedidos por rival.
-
-    home_xg = max(0.25, min(3.2, 0.55 * home_gf + 0.45 * away_ga))
-
-    away_xg = max(0.20, min(3.0, 0.55 * away_gf + 0.45 * home_ga))
-
-    probs = poisson_probs(home_xg, away_xg)
-
-    # Mezcla conservadora solo para 1X2 si la API aporta datos.
-
-    if api_probs:
-
-        for key in ("home", "draw", "away"):
-
-            probs[key] = 0.70 * probs[key] + 0.30 * api_probs[key]
-
-        total = sum(probs[k] for k in ("home", "draw", "away"))
-
-        if total:
-
-            for key in ("home", "draw", "away"):
-
-                probs[key] /= total
-
-    return probs, (home_xg, away_xg)
-
-def extract_odds(odds_data):
-
-    best = {}
-
-    for item in odds_data.get("response", []):
-
-        for bookmaker in item.get("bookmakers", []):
-
-            for bet in bookmaker.get("bets", []):
-
-                name = str(bet.get("name", "")).strip().lower()
-
-                for value in bet.get("values", []):
-
-                    label = str(value.get("value", "")).strip()
-
-                    odd = safe_float(value.get("odd"))
-
-                    if odd is None or not MIN_ODD <= odd <= MAX_ODD:
-
-                        continue
-
-                    low = label.lower()
-
-                    market = key = None
-
-                    if "match winner" in name or name in ("winner", "1x2"):
-
-                        mapping = {
-
-                            "home": "home",
-
-                            "draw": "draw",
-
-                            "away": "away",
-
-                        }
-
-                        if low in mapping:
-
-                            market = "1X2"
-
-                            key = mapping[low]
-
-                    elif "over/under 1.5" in name or "goals over/under 1.5" in name:
-
-                        if low in ("over 1.5", "under 1.5"):
-
-                            market = "Goles 1.5"
-
-                            key = "over15" if low.startswith("over") else "under15"
-
-                    elif "over/under 2.5" in name or "goals over/under 2.5" in name:
-
-                        if low in ("over 2.5", "under 2.5"):
-
-                            market = "Goles 2.5"
-
-                            key = "over25" if low.startswith("over") else "under25"
-
-                    elif "both teams to score" in name or name == "btts":
-
-                        if low in ("yes", "no"):
-
-                            market = "Ambos anotan"
-
-                            key = "btts" if low == "yes" else "nobtts"
-
-                    if market and key:
-
-                        if key not in best or odd > best[key]["odd"]:
-
-                            best[key] = {
-
-                                "market": market,
-
-                                "key": key,
-
-                                "label": label,
-
-                                "odd": odd,
-
-                                "bookmaker": bookmaker.get("name", "Casa"),
-
-                            }
-
-    return list(best.values())
 
 def main():
 
@@ -560,277 +468,123 @@ def main():
 
         raise RuntimeError("Falta API_FOOTBALL_KEY.")
 
-    if not TELEGRAM_TOKEN or not CHAT_ID:
+    file = Path("lines.csv")
 
-        raise RuntimeError("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+    if not file.exists():
 
-    date = now_local().strftime("%Y-%m-%d")
+        raise RuntimeError("No existe lines.csv.")
 
-    print("=" * 60)
+    with file.open(
 
-    print(f"ESCANER DE FUTBOL — {date}")
+        "r", encoding="utf-8-sig", newline=""
 
-    print("=" * 60)
+    ) as source:
 
-    data = api_get(
+        rows = list(csv.DictReader(source))
 
-        "/fixtures",
+    rows = rows[:MAX_LINES]
 
-        {"date": date, "timezone": "America/Tegucigalpa"},
+    alerts = []
 
-    )
-
-    fixtures = [
-
-        f for f in data.get("response", [])
-
-        if f.get("fixture", {}).get("status", {}).get("short") in ("NS", "TBD")
-
-        and f.get("fixture", {}).get("id")
-
-        and f.get("teams", {}).get("home", {}).get("id")
-
-        and f.get("teams", {}).get("away", {}).get("id")
-
-    ]
-
-    print(f"Partidos pendientes: {len(fixtures)}")
-
-    if not fixtures:
-
-        telegram(f"📊 <b>ESCANER DE FUTBOL — {date}</b>\n\nNo hay partidos pendientes.")
-
-        return
-
-    # Por el limite gratuito, cada partido necesita varias consultas.
-
-    fixtures = fixtures[:MAX_FIXTURES]
-
-    results = []
-
-    for f in fixtures:
-
-        if api_calls >= MAX_API_CALLS - 3:
-
-            break
-
-        fid = f["fixture"]["id"]
+    for row in rows:
 
         try:
 
-            odds_data = api_get("/odds", {"fixture": fid})
+            result = analyze(row)
 
-            markets = extract_odds(odds_data)
+            print(
 
-            if not markets:
+                result["team"],
 
-                print("Sin cuotas entre 1.50 y 3.50:", fixture_name(f))
+                result["market"],
 
-                continue
+                result["estimate"]
 
-            api_probs = None
+            )
 
-            if api_calls < MAX_API_CALLS - 3:
-
-                try:
-
-                    api_probs = get_api_prediction(fid)
-
-                except RuntimeError as e:
-
-                    print("Prediccion API omitida:", e)
-
-            home_id = f["teams"]["home"]["id"]
-
-            away_id = f["teams"]["away"]["id"]
-
-            if api_calls >= MAX_API_CALLS - 2:
-
-                print("Sin presupuesto para las dos muestras:", fixture_name(f))
+            if not result["qualified"]:
 
                 continue
 
-            home_rows, home_source = get_team_rows(home_id, "home")
+            direction = (
 
-            if api_calls >= MAX_API_CALLS - 1:
+                "Más de"
 
-                print("Sin presupuesto para muestra visitante:", fixture_name(f))
+                if result["direction"] == "over"
 
-                continue
+                else "Menos de"
 
-            away_rows, away_source = get_team_rows(away_id, "away")
+            )
 
-            probs, xgs = model_probabilities(home_rows, away_rows, api_probs)
+            message = (
 
-            # Si faltan estadisticas, no inventamos probabilidades.
+                "🎯 TOMM REMATES SCANNER\n\n"
 
-            if probs is None:
+                f"⚽ {result['home']} vs {result['away']}\n"
 
-                print("Muestra insuficiente:", fixture_name(f))
+                f"📌 {result['team']} {direction} "
 
-                continue
+                f"{result['line']} {result['market']}\n"
 
-            for market in markets:
+                f"💰 Cuota: {result['odds']:.2f}\n\n"
 
-                prob = probs.get(market["key"])
+                f"📊 Muestra válida: {result['sample']} partidos\n"
 
-                if prob is None or prob < MIN_PROB:
+                f"✅ Acierto histórico: "
 
-                    continue
+                f"{result['own_rate']:.1%}\n"
 
-                implied = 1.0 / market["odd"]
+                f"⚽ Promedio: {result['average']:.2f}\n"
 
-                edge = prob - implied
+                f"🛡️ Frecuencia rival: "
 
-                ev = prob * market["odd"] - 1.0
+                f"{result['rival_rate']:.1%} "
 
-                if edge < MIN_EDGE or ev < MIN_EV:
+                f"({result['rival_sample']} partidos)\n"
 
-                    continue
+                f"📈 Estimación inicial: "
 
-                results.append({
+                f"{result['estimate']:.1%}\n\n"
 
-                    "fixture": f,
+                "Estimación experimental, no garantía. "
 
-                    "market": market,
+                "Verifica la línea y cuota antes de apostar."
 
-                    "prob": prob,
+            )
 
-                    "implied": implied,
+            alerts.append(message)
 
-                    "edge": edge,
+        except Exception as error:
 
-                    "ev": ev,
+            print(
 
-                    "xgs": xgs,
+                "Error analizando",
 
-                    "sample": (
+                row.get("team", "?"),
 
-                        f"Local: {len(home_rows)}; visitante: {len(away_rows)}"
+                str(error)
 
-                    ),
+            )
 
-                    "source": f"{home_source}; {away_source}",
+    if alerts:
 
-                })
+        for message in alerts:
 
-        except RuntimeError as e:
+            send_telegram(message)
 
-            print("Partido omitido:", fixture_name(f), "-", e)
+    else:
 
-            if daily_remaining is not None and daily_remaining <= SAFETY_REMAINING:
+        send_telegram(
 
-                break
+            "📊 TOMM REMATES SCANNER\n\n"
 
-    # Una sola seleccion por partido: no repetir varios mercados del mismo juego.
+            "No se encontraron líneas que superen "
 
-    results.sort(
-
-        key=lambda x: (x["ev"], x["edge"], x["prob"]),
-
-        reverse=True
-
-    )
-
-    final = []
-
-    seen = set()
-
-    for item in results:
-
-        fid = item["fixture"]["fixture"]["id"]
-
-        if fid in seen:
-
-            continue
-
-        seen.add(fid)
-
-        final.append(item)
-
-        if len(final) >= MAX_ALERTS:
-
-            break
-
-    print("Pronosticos validos:", len(final))
-
-    print("Llamadas API usadas:", api_calls)
-
-    print("Requests restantes:", daily_remaining)
-
-    if not final:
-
-        telegram(
-
-            f"📊 <b>ESCANER DE FUTBOL — {date}</b>\n\n"
-
-            "❌ <b>NO HAY PRONOSTICOS QUE SUPEREN LOS FILTROS.</b>\n\n"
-
-            f"Cuota: {MIN_ODD:.2f}–{MAX_ODD:.2f}\n"
-
-            f"Probabilidad estimada minima: {MIN_PROB:.0%}\n"
-
-            "El bot no fuerza apuestas. Se necesita validar el modelo "
-
-            "con resultados historicos antes de confiar en su rentabilidad."
+            "los filtros estadísticos."
 
         )
 
-        return
-
-    lines = [
-
-        f"⚽ <b>ESCANER DE FUTBOL — {date}</b>",
-
-        "",
-
-        f"Mejores pronosticos: <b>{len(final)}</b>",
-
-        "",
-
-    ]
-
-    for i, item in enumerate(final, 1):
-
-        m = item["market"]
-
-        lines.extend([
-
-            f"🏆 <b>#{i} {fixture_name(item['fixture'])}</b>",
-
-            f"🎯 Mercado: <b>{m['market']} — {m['label']}</b>",
-
-            f"💰 Cuota: <b>{m['odd']:.2f}</b>",
-
-            f"🏦 Casa: {m['bookmaker']}",
-
-            f"📈 Probabilidad estimada: <b>{item['prob']:.1%}</b>",
-
-            f"📉 Probabilidad implicita: <b>{item['implied']:.1%}</b>",
-
-            f"🔎 Diferencia estimada: <b>{item['edge']:+.1%}</b>",
-
-            f"💎 EV teorico: <b>{item['ev']:+.1%}</b>",
-
-            f"⚽ Goles esperados: local {item['xgs'][0]:.2f} — visitante {item['xgs'][1]:.2f}",
-
-            f"📊 Muestra: {item['sample']}",
-
-            "",
-
-        ])
-
-    lines.extend([
-
-        "⚠️ <i>Estimaciones del modelo, no garantias. "
-
-        "Las probabilidades aun necesitan validacion historica.</i>",
-
-        f"🔧 Llamadas API usadas: {api_calls}",
-
-    ])
-
-    telegram("\n".join(lines))
+    print("Solicitudes API:", requests_used)
 
 if __name__ == "__main__":
 
@@ -838,14 +592,20 @@ if __name__ == "__main__":
 
         main()
 
-    except Exception as e:
+    except Exception as error:
 
-        message = f"🛑 <b>BOT DETENIDO</b>\n\n{e}"
+        print("BOT DETENIDO:", error)
 
-        print(message)
+        try:
 
-        if TELEGRAM_TOKEN and CHAT_ID:
+            send_telegram(
 
-            telegram(message)
+                "🛑 TOMM REMATES SCANNER\n" + str(error)
+
+            )
+
+        except Exception:
+
+            pass
 
         raise
