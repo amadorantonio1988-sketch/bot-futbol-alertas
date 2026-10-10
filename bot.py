@@ -12,9 +12,9 @@ import requests
 
 API_BASE = "https://v3.football.api-sports.io"
 TZ = ZoneInfo("America/Tegucigalpa")
-MAX_API_CALLS = int(os.getenv("MAX_API_CALLS", "60"))
+MAX_API_CALLS = int(os.getenv("MAX_API_CALLS", "20"))
 MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
-MAX_MATCHES_TO_ANALYZE = int(os.getenv("MAX_MATCHES_TO_ANALYZE", "10"))
+MAX_MATCHES_TO_ANALYZE = int(os.getenv("MAX_MATCHES_TO_ANALYZE", "3"))
 RECENT_TEAM_MATCHES = 10
 MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.70"))
 MIN_ODDS = float(os.getenv("MIN_ODDS", "1.50"))  # superior a 1.49
