@@ -2,54 +2,68 @@
 
 import os
 
+from datetime import datetime, timezone
+
 import requests
 
 API_KEY = os.getenv("OPENFOOT_API_KEY")
 
 if not API_KEY:
 
-    print("ERROR: Falta el secreto OPENFOOT_API_KEY")
+    raise SystemExit("ERROR: Falta OPENFOOT_API_KEY en el entorno.")
 
-    raise SystemExit(1)
+url = "https://openfootapi.com/v1/matches"
 
-url = "https://api.openfootapi.com/v1/fixtures"
+params = {
+
+    "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+}
+
+headers = {
+
+    "Accept": "application/json",
+
+    "Authorization": f"Bearer {API_KEY}",
+
+}
 
 try:
 
     response = requests.get(
 
-        url,
-
-        headers={"Authorization": f"Bearer {API_KEY}"},
-
-        timeout=20,
+        url, headers=headers, params=params, timeout=20
 
     )
 
     print("Código HTTP:", response.status_code)
 
-    if response.status_code == 200:
+    if response.status_code != 200:
 
-        data = response.json()
+        print("La API rechazó la petición. Revisa el código HTTP.")
 
-        print("Conexión correcta.")
+        print("Respuesta:", response.text[:500])
 
-        print("Tipo de respuesta:", type(data).__name__)
+        raise SystemExit(1)
 
-        if isinstance(data, dict):
+    result = response.json()
 
-            print("Campos recibidos:", list(data.keys()))
+    matches = result.get("data", [])
 
-        elif isinstance(data, list):
+    print("Conexión correcta.")
 
-            print("Partidos recibidos:", len(data))
+    print("Partidos devueltos:", len(matches))
 
-        print("Muestra de respuesta:", str(data)[:1500])
+    print("Acceso:", result.get("meta", {}).get("access", {}))
 
-    else:
+    for match in matches[:5]:
 
-        print("Respuesta:", response.text[:1000])
+        home = match.get("homeTeam", {}).get("name", "Local desconocido")
+
+        away = match.get("awayTeam", {}).get("name", "Visitante desconocido")
+
+        print(f"- {home} vs {away}")
 
 except requests.RequestException as error:
 
-    print("Error de conexión:", error)
+    raise SystemExit(f"Error de conexión: {error}")
