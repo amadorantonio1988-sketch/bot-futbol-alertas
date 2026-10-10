@@ -1,380 +1,611 @@
-#!/usr/bin/env python3
-"""Bot diario: mejores señales Over 2.5 en ligas seleccionadas."""
 import os
-import sys
+
 import math
+
 import time
-import logging
-from datetime import datetime
+
+from datetime import datetime, timedelta, timezone
+
 from zoneinfo import ZoneInfo
 
 import requests
 
-API_BASE = "https://v3.football.api-sports.io"
-TZ = ZoneInfo("America/Tegucigalpa")
-MAX_API_CALLS = int(os.getenv("MAX_API_CALLS", "20"))
-MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
-MAX_MATCHES_TO_ANALYZE = int(os.getenv("MAX_MATCHES_TO_ANALYZE", "3"))
-RECENT_TEAM_MATCHES = 10
-MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.70"))
-MIN_ODDS = float(os.getenv("MIN_ODDS", "1.50"))  # superior a 1.49
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.25"))
+# ==================================================
 
-# Competiciones objetivo: grandes ligas europeas, torneos continentales,
-# primeras divisiones sudamericanas y Liga MX.
-LEAGUES = {
-    2: "UEFA Champions League",
-    3: "UEFA Europa League",
-    848: "UEFA Conference League",
-    39: "Premier League",
-    140: "LaLiga",
-    135: "Serie A italiana",
-    78: "Bundesliga",
-    61: "Ligue 1",
-    94: "Primeira Liga",
-    88: "Eredivisie",
-    71: "Brasileirão Série A",
-    128: "Liga Profesional Argentina",
-    13: "Copa Libertadores",
-    11: "Copa Sudamericana",
-    239: "Primera A Colombia",
-    268: "Primera División Uruguay",
-    265: "Primera División Chile",
-    242: "LigaPro Ecuador",
-    262: "Liga MX",
+# BOT DE ALERTAS DE FUTBOL - SOLO OVER 2.5 GOLES
+
+# ==================================================
+
+OPENFOOT_API_KEY = os.getenv("OPENFOOT_API_KEY", "").strip()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+BASE_URL = "https://openfootapi.com/v1"
+
+LOCAL_TZ = ZoneInfo("America/Tegucigalpa")
+
+MIN_PROBABILITY = 0.60
+
+MIN_ODD = 1.50
+
+MAX_ALERTS = 5
+
+HISTORY_SIZE = 10
+
+session = requests.Session()
+
+history_cache = {}
+
+# Banderas por país o competición.
+
+COUNTRY_FLAGS = {
+
+    "spain": "🇪🇸", "españa": "🇪🇸", "espana": "🇪🇸",
+
+    "brazil": "🇧🇷", "brasil": "🇧🇷",
+
+    "honduras": "🇭🇳",
+
+    "england": "🏴", "inglaterra": "🏴",
+
+    "italy": "🇮🇹", "italia": "🇮🇹",
+
+    "germany": "🇩🇪", "alemania": "🇩🇪",
+
+    "france": "🇫🇷", "francia": "🇫🇷",
+
+    "portugal": "🇵🇹",
+
+    "netherlands": "🇳🇱", "holanda": "🇳🇱",
+
+    "argentina": "🇦🇷",
+
+    "mexico": "🇲🇽", "méxico": "🇲🇽", "mexico": "🇲🇽",
+
+    "peru": "🇵🇪", "perú": "🇵🇪",
+
+    "colombia": "🇨🇴",
+
+    "chile": "🇨🇱",
+
+    "uruguay": "🇺🇾",
+
+    "united states": "🇺🇸", "usa": "🇺🇸",
+
+    "south korea": "🇰🇷", "korea": "🇰🇷",
+
+    "japan": "🇯🇵",
+
+    "scotland": "🏴",
+
+    "turkey": "🇹🇷", "türkiye": "🇹🇷",
+
+    "saudi arabia": "🇸🇦",
+
+    "switzerland": "🇨🇭",
+
+    "belgium": "🇧🇪",
+
+    "australia": "🇦🇺",
+
+    "international": "🌍",
+
 }
 
-LEAGUE_PRIORITY = {
-    39: 0, 140: 1, 135: 2, 78: 3, 61: 4,
-    128: 5, 262: 6, 71: 7, 2: 8, 3: 9,
-    13: 10, 11: 11, 94: 12, 88: 13, 848: 14,
-    239: 15, 242: 16, 265: 17, 268: 18,
-}
+def api_get(endpoint, params=None):
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("bot-futbol")
+    url = f"{BASE_URL}/{endpoint.lstrip('/')}"
 
+    headers = {
 
-class FootballAPI:
-    def __init__(self, key):
-        self.session = requests.Session()
-        self.session.headers.update({"x-apisports-key": key})
-        self.calls = 0
-        self.cache = {}
-        self.remaining = None
-        self.stopped = False
+        "Accept": "application/json",
 
-    def get(self, endpoint, params=None):
-        params = params or {}
-        cache_key = (endpoint, tuple(sorted(params.items())))
-        if cache_key in self.cache:
-            return self.cache[cache_key]
-        if self.stopped or self.calls >= MAX_API_CALLS:
-            log.warning("Presupuesto local de consultas alcanzado; no se hacen más solicitudes.")
-            return None
-        if self.remaining is not None and self.remaining <= 2:
-            log.warning("Quedan solo %s consultas según la API; se detiene el bot.", self.remaining)
-            self.stopped = True
-            return None
+        "Authorization": f"Bearer {OPENFOOT_API_KEY}",
 
-        self.calls += 1
-        try:
-            response = self.session.get(API_BASE + endpoint, params=params, timeout=20)
-            remaining = response.headers.get("x-ratelimit-requests-remaining")
-            if remaining is not None:
-                try:
-                    self.remaining = int(remaining)
-                except ValueError:
-                    pass
-            if response.status_code == 429:
-                log.error("API-Football respondió 429/límite alcanzado. No se reintenta.")
-                self.stopped = True
-                return None
-            response.raise_for_status()
-            payload = response.json()
-            if payload.get("errors"):
-                log.warning("Error de API en %s: %s", endpoint, payload["errors"])
-                # Si la API indica que se agotó el límite, detener las consultas.
-                error_text = str(payload["errors"]).lower()
-                if "limit" in error_text or "requests" in error_text:
-                    self.stopped = True
-                return None
-            result = payload.get("response", [])
-            self.cache[cache_key] = result
-            time.sleep(REQUEST_DELAY)
-            return result
-        except (requests.RequestException, ValueError) as exc:
-            log.warning("Falló consulta %s: %s", endpoint, exc)
-            return None
-
-
-def poisson_over(total_goals, line=2.5):
-    """Probabilidad de marcar más de 2.5 goles con una Poisson simple."""
-    threshold = int(math.floor(line))
-    cumulative = sum(
-        math.exp(-total_goals) * total_goals ** goals / math.factorial(goals)
-        for goals in range(threshold + 1)
-    )
-    return max(0.0, min(1.0, 1.0 - cumulative))
-
-
-def get_team_recent_stats(api, team_id):
-    """Calcula estadísticas de los últimos 10 partidos del equipo, en cualquier condición."""
-    today = datetime.now(TZ).date()
-    from datetime import timedelta
-    date_from = (today - timedelta(days=365)).isoformat()
-    date_to = today.isoformat()
-    collected = {}
-
-    # La API gratuita exige season y no permite el parámetro `last`.
-    # Consultamos la temporada actual y, si hace falta, la anterior para completar la muestra.
-    for season in (today.year, today.year - 1):
-        rows = api.get("/fixtures", {
-            "team": team_id,
-            "season": season,
-            "from": date_from,
-            "to": date_to,
-            "timezone": "America/Tegucigalpa",
-        })
-        if rows is None:
-            # Si la API se detuvo por límite/error, no continuar haciendo llamadas.
-            if api.stopped or api.calls >= MAX_API_CALLS:
-                break
-            continue
-
-        for fixture in rows:
-            fixture_id = (fixture.get("fixture") or {}).get("id")
-            status = ((fixture.get("fixture") or {}).get("status") or {}).get("short")
-            if not fixture_id or status not in ("FT", "AET", "PEN"):
-                continue
-            teams = fixture.get("teams") or {}
-            goals = fixture.get("goals") or {}
-            home = teams.get("home") or {}
-            away = teams.get("away") or {}
-            home_goals, away_goals = goals.get("home"), goals.get("away")
-            if home_goals is None or away_goals is None:
-                continue
-
-            if home.get("id") == team_id:
-                gf, ga = int(home_goals), int(away_goals)
-            elif away.get("id") == team_id:
-                gf, ga = int(away_goals), int(home_goals)
-            else:
-                continue
-            collected[fixture_id] = {
-                "date": (fixture.get("fixture") or {}).get("date") or "",
-                "gf": gf,
-                "ga": ga,
-            }
-
-        if len(collected) >= RECENT_TEAM_MATCHES:
-            break
-        if api.stopped or api.calls >= MAX_API_CALLS:
-            break
-
-    recent = sorted(collected.values(), key=lambda row: row["date"], reverse=True)[:RECENT_TEAM_MATCHES]
-    if len(recent) < RECENT_TEAM_MATCHES:
-        log.info(
-            "Equipo ID %s: solo se obtuvieron %s partidos generales válidos; se necesitan %s.",
-            team_id, len(recent), RECENT_TEAM_MATCHES
-        )
-        return None
-
-    totals = [row["gf"] + row["ga"] for row in recent]
-    return {
-        "n": len(recent),
-        "gf": sum(row["gf"] for row in recent) / len(recent),
-        "ga": sum(row["ga"] for row in recent) / len(recent),
-        "over25_rate": sum(total >= 3 for total in totals) / len(totals),
-        "over25_count": sum(total >= 3 for total in totals),
     }
 
+    for attempt in range(3):
 
-def estimate_expected_goals(home_stats, away_stats):
-    # Estima goles con las medias generales de los últimos 10 partidos de cada equipo,
-    # sin separar sus resultados como local o visitante.
-    home_xg = max(0.05, (home_stats["gf"] + away_stats["ga"]) / 2)
-    away_xg = max(0.05, (away_stats["gf"] + home_stats["ga"]) / 2)
-    return home_xg, away_xg
+        try:
 
+            response = session.get(
 
-def get_over25_odds(api, fixture_id):
-    """Devuelve una cuota Over 2.5 disponible; no inventa cuotas si faltan."""
-    rows = api.get("/odds", {"fixture": fixture_id})
-    found = []
-    if not rows:
-        return None
+                url, headers=headers, params=params or {}, timeout=20
 
-    for entry in rows:
-        for bookmaker in entry.get("bookmakers", []) or []:
-            for bet in bookmaker.get("bets", []) or []:
-                bet_name = (bet.get("name") or "").lower()
-                # Totals/Over-Under de goles, evitando mercados de córners y tarjetas.
-                if not any(term in bet_name for term in ("goal", "total", "over/under")):
-                    continue
-                if any(term in bet_name for term in ("corner", "card", "booking", "player")):
-                    continue
-                for value in bet.get("values", []) or []:
-                    label = "".join((value.get("value") or "").lower().split())
-                    if label not in ("over2.5", "over2,5", "over2.50", "over2,50"):
-                        continue
-                    try:
-                        odd = float(value.get("odd"))
-                    except (TypeError, ValueError):
-                        continue
-                    if odd >= MIN_ODDS:
-                        found.append(odd)
-    # Usa la cuota más baja que cumple el umbral entre las disponibles, opción conservadora.
-    return min(found) if found else None
+            )
 
+            if response.status_code == 429:
+
+                time.sleep(2 ** attempt)
+
+                continue
+
+            if response.status_code != 200:
+
+                print(
+
+                    f"OpenFoot HTTP {response.status_code}: "
+
+                    f"{response.text[:250]}"
+
+                )
+
+                return None
+
+            time.sleep(0.15)
+
+            return response.json()
+
+        except (requests.RequestException, ValueError) as error:
+
+            print("Error de OpenFoot:", error)
+
+            time.sleep(2 ** attempt)
+
+    return None
 
 def send_telegram(message):
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        log.error("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID en GitHub Secrets.")
-        return False
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
-            timeout=20,
-        )
-        response.raise_for_status()
-        body = response.json()
-        if not body.get("ok"):
-            log.error("Telegram no confirmó el envío: %s", body)
-            return False
-        return True
-    except (requests.RequestException, ValueError) as exc:
-        log.error("Error enviando a Telegram: %s", exc)
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+
+        print("Faltan los secretos de Telegram.")
+
         return False
 
+    url = (
 
-def main():
-    api_key = os.getenv("API_FOOTBALL_KEY", "").strip()
-    if not api_key:
-        log.error("Falta API_FOOTBALL_KEY en GitHub Secrets.")
-        sys.exit(1)
+        f"https://api.telegram.org/bot"
 
-    today = datetime.now(TZ).date().isoformat()
-    log.info("Fecha Honduras: %s", today)
-    log.info("Filtros: Over 2.5, últimos 10 partidos generales por equipo, probabilidad estimada >= %.1f%%, cuota >= %.2f; máximo %d alertas.",
-             MIN_PROBABILITY * 100, MIN_ODDS, MAX_ALERTS)
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    api = FootballAPI(api_key)
-    fixtures = api.get("/fixtures", {"date": today, "timezone": "America/Tegucigalpa"})
-    if fixtures is None:
-        log.error("No se pudo recuperar la cartelera del día.")
-        sys.exit(1)
-
-    log.info("Partidos devueltos por API para la fecha: %d", len(fixtures))
-    matches = []
-    for fixture in fixtures:
-        league = fixture.get("league") or {}
-        league_id = league.get("id")
-        if league_id not in LEAGUES:
-            continue
-        status = ((fixture.get("fixture") or {}).get("status") or {}).get("short", "")
-        if status not in ("NS", "TBD"):
-            continue
-        teams = fixture.get("teams") or {}
-        home, away = teams.get("home") or {}, teams.get("away") or {}
-        fixture_id = (fixture.get("fixture") or {}).get("id")
-        if not fixture_id or not home.get("id") or not away.get("id"):
-            continue
-        matches.append({
-            "id": fixture_id,
-            "date": (fixture.get("fixture") or {}).get("date", ""),
-            "league_id": league_id,
-            "league": LEAGUES[league_id],
-            "home": home,
-            "away": away,
-        })
-
-    matches.sort(key=lambda match: (
-        LEAGUE_PRIORITY.get(match["league_id"], 99), match["date"]
-    ))
-    log.info("Partidos futuros de ligas objetivo: %d", len(matches))
-    if len(matches) > MAX_MATCHES_TO_ANALYZE:
-        log.info("Se evaluarán hasta %d partidos para respetar el presupuesto de API.", MAX_MATCHES_TO_ANALYZE)
-    matches = matches[:MAX_MATCHES_TO_ANALYZE]
-
-    team_cache = {}
-    picks = []
-    for match in matches:
-        if api.stopped or api.calls >= MAX_API_CALLS:
-            log.warning("Se detiene el análisis por presupuesto de API.")
-            break
-        home_id, away_id = match["home"]["id"], match["away"]["id"]
-        home_key, away_key = home_id, away_id
-        if home_key not in team_cache:
-            team_cache[home_key] = get_team_recent_stats(api, home_id)
-        if away_key not in team_cache:
-            team_cache[away_key] = get_team_recent_stats(api, away_id)
-        home_stats, away_stats = team_cache[home_key], team_cache[away_key]
-        if not home_stats or not away_stats:
-            log.info("Se omite %s vs %s: no se obtuvieron 10 partidos generales válidos.",
-                     match["home"].get("name"), match["away"].get("name"))
-            continue
-
-        home_xg, away_xg = estimate_expected_goals(home_stats, away_stats)
-        total_xg = home_xg + away_xg
-        probability = poisson_over(total_xg, 2.5)
-        log.info("%s vs %s | liga=%s | Over 2.5 estimado=%.1f%% | goles esperados=%.2f",
-                 match["home"].get("name"), match["away"].get("name"),
-                 match["league"], probability * 100, total_xg)
-
-        if probability < MIN_PROBABILITY:
-            log.info("Se descarta: probabilidad %.1f%% menor que %.1f%%.",
-                     probability * 100, MIN_PROBABILITY * 100)
-            continue
-
-        # Solo consulta cuotas para partidos con suficiente probabilidad estadística.
-        odd = get_over25_odds(api, match["id"])
-        if odd is None:
-            log.info("Se descarta %s vs %s: no hay cuota Over 2.5 disponible >= %.2f.",
-                     match["home"].get("name"), match["away"].get("name"), MIN_ODDS)
-            continue
-
-        picks.append({
-            **match, "probability": probability, "odd": odd,
-            "total_xg": total_xg, "home_xg": home_xg, "away_xg": away_xg,
-            "home_stats": home_stats, "away_stats": away_stats,
-        })
-
-    picks.sort(key=lambda pick: (pick["probability"], pick["total_xg"]), reverse=True)
-    picks = picks[:MAX_ALERTS]
-    log.info("Consultas API usadas: %d; picks que cumplen todos los filtros: %d", api.calls, len(picks))
-
-    if not picks:
-        log.info("No se encontraron picks Over 2.5 con probabilidad y cuota suficientes. No se envía alerta de apuesta.")
-        return
-
-    message = [f"⚽ MEJORES SEÑALES OVER 2.5 — {today} (Honduras)",
-               f"Picks que cumplen todos los filtros: {len(picks)}", ""]
-    for index, pick in enumerate(picks, 1):
-        kickoff = pick["date"].replace("T", " ")[:16]
-        message.extend([
-            f"🏆 #{index} {pick['home'].get('name')} vs {pick['away'].get('name')}",
-            f"🏟️ {pick['league']} | Inicio: {kickoff} (hora Honduras)",
-            "🎯 Pronóstico: Over 2.5 goles",
-            f"💰 Cuota Over 2.5: {pick['odd']:.2f}",
-            f"📈 Probabilidad estimada: {pick['probability'] * 100:.1f}%",
-            f"⚽ Goles esperados estimados: {pick['total_xg']:.2f} (local {pick['home_xg']:.2f} + visitante {pick['away_xg']:.2f})",
-            f"📊 {pick['home'].get('name')}, últimos 10 partidos generales: GF {pick['home_stats']['gf']:.2f}, GC {pick['home_stats']['ga']:.2f}; Over 2.5 en {pick['home_stats']['over25_rate'] * 100:.0f}% ({pick['home_stats']['over25_count']}/10).",
-            f"📊 {pick['away'].get('name')}, últimos 10 partidos generales: GF {pick['away_stats']['gf']:.2f}, GC {pick['away_stats']['ga']:.2f}; Over 2.5 en {pick['away_stats']['over25_rate'] * 100:.0f}% ({pick['away_stats']['over25_count']}/10).",
-            "",
-        ])
-    message.append(
-        "Nota: la probabilidad es una estimación orientativa basada en goles recientes y Poisson, no una garantía. "
-        "Solo se incluyen cuotas disponibles en la API de al menos 1.50."
     )
 
-    if not send_telegram("\n".join(message)):
-        sys.exit(1)
-    log.info("Alerta enviada correctamente a Telegram.")
+    try:
 
+        response = session.post(
+
+            url,
+
+            json={
+
+                "chat_id": TELEGRAM_CHAT_ID,
+
+                "text": message,
+
+                "parse_mode": "HTML",
+
+                "disable_web_page_preview": True,
+
+            },
+
+            timeout=20,
+
+        )
+
+        if response.status_code != 200:
+
+            print("Error de Telegram:", response.text[:250])
+
+            return False
+
+        return True
+
+    except requests.RequestException as error:
+
+        print("No se pudo enviar Telegram:", error)
+
+        return False
+
+def parse_date(value):
+
+    if not value:
+
+        return None
+
+    try:
+
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    except (TypeError, ValueError):
+
+        return None
+
+def get_flag(match):
+
+    competition = match.get("competition") or {}
+
+    country = str(
+
+        competition.get("country")
+
+        or match.get("country")
+
+        or ""
+
+    ).strip().lower()
+
+    if country in COUNTRY_FLAGS:
+
+        return COUNTRY_FLAGS[country]
+
+    home = match.get("homeTeam") or {}
+
+    country = str(home.get("country") or "").strip().lower()
+
+    if country in COUNTRY_FLAGS:
+
+        return COUNTRY_FLAGS[country]
+
+    # Si no se puede identificar el país, no se inventa una bandera.
+
+    return "⚽"
+
+def get_today_matches():
+
+    now_utc = datetime.now(timezone.utc)
+
+    today_honduras = datetime.now(LOCAL_TZ).date()
+
+    dates = {
+
+        now_utc.date().isoformat(),
+
+        (now_utc.date() + timedelta(days=1)).isoformat(),
+
+    }
+
+    matches_by_id = {}
+
+    for date in sorted(dates):
+
+        result = api_get("matches", {"date": date})
+
+        if not result:
+
+            continue
+
+        for match in result.get("data", []) or []:
+
+            match_id = match.get("id")
+
+            if match_id:
+
+                matches_by_id[match_id] = match
+
+    upcoming = []
+
+    for match in matches_by_id.values():
+
+        kickoff = parse_date(match.get("kickoffAt"))
+
+        if not kickoff or kickoff <= now_utc:
+
+            continue
+
+        if kickoff.astimezone(LOCAL_TZ).date() != today_honduras:
+
+            continue
+
+        status = str(match.get("status", "")).lower()
+
+        if status not in ("scheduled", "unknown"):
+
+            continue
+
+        home = match.get("homeTeam") or {}
+
+        away = match.get("awayTeam") or {}
+
+        if not home.get("id") or not away.get("id"):
+
+            continue
+
+        upcoming.append(match)
+
+    upcoming.sort(
+
+        key=lambda item: parse_date(item.get("kickoffAt"))
+
+        or now_utc
+
+    )
+
+    return upcoming
+
+def get_history(team_id, season):
+
+    cache_key = (team_id, str(season or ""))
+
+    if cache_key in history_cache:
+
+        return history_cache[cache_key]
+
+    params = {
+
+        "team": team_id,
+
+        "status": "finished",
+
+    }
+
+    if season:
+
+        params["season"] = season
+
+    result = api_get("matches", params)
+
+    if not result:
+
+        history_cache[cache_key] = []
+
+        return []
+
+    history_cache[cache_key] = result.get("data", []) or []
+
+    return history_cache[cache_key]
+
+def team_stats(team_id, season, target_kickoff):
+
+    history = get_history(team_id, season)
+
+    valid = []
+
+    for match in history:
+
+        kickoff = parse_date(match.get("kickoffAt"))
+
+        if not kickoff or kickoff >= target_kickoff:
+
+            continue
+
+        if str(match.get("status", "")).lower() != "finished":
+
+            continue
+
+        score = match.get("score") or {}
+
+        home_goals = score.get("home")
+
+        away_goals = score.get("away")
+
+        if not isinstance(home_goals, (int, float)):
+
+            continue
+
+        if not isinstance(away_goals, (int, float)):
+
+            continue
+
+        home = match.get("homeTeam") or {}
+
+        away = match.get("awayTeam") or {}
+
+        if home.get("id") == team_id:
+
+            goals_for = home_goals
+
+            goals_against = away_goals
+
+        elif away.get("id") == team_id:
+
+            goals_for = away_goals
+
+            goals_against = home_goals
+
+        else:
+
+            continue
+
+        valid.append({
+
+            "date": kickoff,
+
+            "gf": float(goals_for),
+
+            "ga": float(goals_against),
+
+            "total": float(home_goals + away_goals),
+
+        })
+
+    valid.sort(key=lambda item: item["date"], reverse=True)
+
+    valid = valid[:HISTORY_SIZE]
+
+    if len(valid) < HISTORY_SIZE:
+
+        return None
+
+    count = len(valid)
+
+    return {
+
+        "matches": count,
+
+        "avg_for": sum(x["gf"] for x in valid) / count,
+
+        "avg_against": sum(x["ga"] for x in valid) / count,
+
+        "over_count": sum(x["total"] >= 3 for x in valid),
+
+        "over_rate": sum(x["total"] >= 3 for x in valid) / count,
+
+    }
+
+def poisson_over_25(expected_goals):
+
+    lam = max(0.01, expected_goals)
+
+    p0 = math.exp(-lam)
+
+    p1 = p0 * lam
+
+    p2 = p1 * lam / 2
+
+    return 1 - p0 - p1 - p2
+
+def analyze(match):
+
+    kickoff = parse_date(match.get("kickoffAt"))
+
+    if not kickoff:
+
+        return None
+
+    home = match.get("homeTeam") or {}
+
+    away = match.get("awayTeam") or {}
+
+    season = match.get("season")
+
+    home_stats = team_stats(home["id"], season, kickoff)
+
+    away_stats = team_stats(away["id"], season, kickoff)
+
+    if not home_stats or not away_stats:
+
+        print(
+
+            "Historial insuficiente:",
+
+            home.get("name"), "vs", away.get("name")
+
+        )
+
+        return None
+
+    home_expected = (
+
+        home_stats["avg_for"] + away_stats["avg_against"]
+
+    ) / 2
+
+    away_expected = (
+
+        away_stats["avg_for"] + home_stats["avg_against"]
+
+    ) / 2
+
+    expected_total = home_expected + away_expected
+
+    model_probability = poisson_over_25(expected_total)
+
+    probability = (
+
+        0.50 * model_probability
+
+        + 0.25 * home_stats["over_rate"]
+
+        + 0.25 * away_stats["over_rate"]
+
+    )
+
+    probability = min(0.95, max(0.0, probability))
+
+    return {
+
+        "home": home.get("name", "Local"),
+
+        "away": away.get("name", "Visitante"),
+
+        "flag": get_flag(match),
+
+        "probability": probability,
+
+        "expected_goals": expected_total,
+
+        "kickoff": kickoff,
+
+    }
+
+def main():
+
+    if not OPENFOOT_API_KEY:
+
+        raise SystemExit("Falta el secreto OPENFOOT_API_KEY.")
+
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+
+        raise SystemExit(
+
+            "Falta TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID."
+
+        )
+
+    today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+
+    print("Fecha Honduras:", today)
+
+    matches = get_today_matches()
+
+    print("Partidos futuros para hoy:", len(matches))
+
+    picks = []
+
+    for match in matches:
+
+        result = analyze(match)
+
+        if result and result["probability"] >= MIN_PROBABILITY:
+
+            picks.append(result)
+
+    picks.sort(
+
+        key=lambda item: item["probability"],
+
+        reverse=True,
+
+    )
+
+    picks = picks[:MAX_ALERTS]
+
+    if not picks:
+
+        send_telegram(
+
+            f"🔎 <b>OVER 2.5 GOLES — {today}</b>\n"
+
+            "No se encontraron selecciones con datos suficientes "
+
+            "y probabilidad estimada mínima del 60%.\n"
+
+            "No se dispone de cuotas verificadas; no se envían picks."
+
+        )
+
+        print("No hay selecciones válidas.")
+
+        return
+
+    # No se envían alertas hasta verificar la cuota real >= 1.50.
+
+    # OpenFoot Starter no ha confirmado una fuente de cuotas.
+
+    print(
+
+        f"Hay {len(picks)} candidatos estadísticos, pero no se envían "
+
+        "alertas porque no se han verificado cuotas >= 1.50."
+
+    )
+
+    send_telegram(
+
+        f"🔎 <b>ESCÁNER OVER 2.5 — {today}</b>\n"
+
+        f"Candidatos estadísticos encontrados: {len(picks)}.\n"
+
+        "No se enviaron picks porque esta configuración todavía no "
+
+        "tiene una fuente de cuotas verificadas."
+
+    )
 
 if __name__ == "__main__":
+
     main()
+
+    
