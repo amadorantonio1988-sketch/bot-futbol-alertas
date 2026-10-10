@@ -1,342 +1,685 @@
+
+
 import os
-import time
+
+import sys
+
 import math
+
+import time
+
+import logging
+
+from datetime import datetime
+
+from zoneinfo import ZoneInfo
+
 import requests
-from datetime import datetime, timezone, timedelta
 
-# Bot de alertas de fútbol: API-Football + Telegram
-# GitHub Actions secrets necesarios:
-# API_FOOTBALL_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+API_BASE = "https://v3.football.api-sports.io"
 
-BASE_URL = "https://v3.football.api-sports.io"
-API_KEY = os.getenv("API_FOOTBALL_KEY", "").strip()
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TZ = ZoneInfo("America/Tegucigalpa")
 
-MIN_ODD = float(os.getenv("MIN_ODD", "1.50"))
-MAX_ODD = float(os.getenv("MAX_ODD", "2.20"))
-MIN_PROB = float(os.getenv("MIN_PROBABILITY", "0.61"))
-MIN_EDGE = float(os.getenv("MIN_EDGE", "0.03"))
-MAX_FIXTURES_TO_CHECK = int(os.getenv("MAX_FIXTURES_TO_CHECK", "20"))
-MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
-REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.35"))
-TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET_HOURS", "-6"))
+MAX_API_CALLS = 60
 
-session = requests.Session()
-session.headers.update({"x-apisports-key": API_KEY})
-request_count = 0
+MAX_ALERTS = 5
 
+MAX_MATCHES = 8
 
-def telegram(message):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print("Telegram no configurado; se muestra el mensaje en el log.")
-        print(message)
-        return
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": TG_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }, timeout=20)
-    r.raise_for_status()
+RECENT_MATCHES = 10
 
+MIN_PROBABILITY = 0.70
 
-def api_get(endpoint, params=None):
-    global request_count
-    if not API_KEY:
-        raise RuntimeError("Falta el secreto API_FOOTBALL_KEY.")
-    request_count += 1
-    for attempt in range(3):
+MIN_EXPECTED_GOALS = 1.65
+
+LEAGUES = {
+
+    2: "Champions League",
+
+    3: "Europa League",
+
+    848: "Conference League",
+
+    39: "Premier League",
+
+    140: "LaLiga",
+
+    78: "Bundesliga",
+
+    135: "Serie A",
+
+    61: "Ligue 1",
+
+    94: "Primeira Liga",
+
+    88: "Eredivisie",
+
+    71: "Brasileirao Serie A",
+
+    72: "Brasileirao Serie B",
+
+    128: "Liga Argentina",
+
+    13: "Copa Libertadores",
+
+    11: "Copa Sudamericana",
+
+    239: "Liga Colombia",
+
+    268: "Liga Uruguay",
+
+    265: "Liga Chile",
+
+    242: "Liga Ecuador",
+
+    262: "Liga MX",
+
+    281: "Liga Expansion MX",
+
+    253: "MLS",
+
+}
+
+logging.basicConfig(
+
+    level=logging.INFO,
+
+    format="%(asctime)s %(levelname)s %(message)s"
+
+)
+
+log = logging.getLogger("bot-futbol")
+
+class FootballAPI:
+
+    def __init__(self, key):
+
+        self.session = requests.Session()
+
+        self.session.headers.update({"x-apisports-key": key})
+
+        self.calls = 0
+
+        self.cache = {}
+
+        self.remaining = None
+
+    def get(self, endpoint, params=None):
+
+        params = params or {}
+
+        cache_key = (endpoint, tuple(sorted(params.items())))
+
+        if cache_key in self.cache:
+
+            return self.cache[cache_key]
+
+        if self.calls >= MAX_API_CALLS:
+
+            log.warning("Límite local de consultas alcanzado.")
+
+            return None
+
+        if self.remaining is not None and self.remaining <= 2:
+
+            log.warning("Quedan muy pocas consultas. Se detiene el bot.")
+
+            return None
+
+        self.calls += 1
+
         try:
-            r = session.get(f"{BASE_URL}/{endpoint}", params=params or {}, timeout=25)
-            if r.status_code == 429:
-                raise RuntimeError("API-Football respondió 429: límite de solicitudes alcanzado.")
-            r.raise_for_status()
-            data = r.json()
-            errors = data.get("errors")
-            if errors:
-                raise RuntimeError(f"Error API-Football: {errors}")
-            time.sleep(REQUEST_DELAY)
-            return data.get("response", [])
-        except RuntimeError:
-            raise
-        except requests.RequestException:
-            if attempt == 2:
-                raise
-            time.sleep(2 * (attempt + 1))
-    return []
 
+            response = self.session.get(
 
-def local_date():
-    return (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_OFFSET)).date().isoformat()
+                API_BASE + endpoint,
 
+                params=params,
 
-def get_fixtures(date_str):
-    return api_get("fixtures", {"date": date_str, "timezone": "America/Tegucigalpa"})
+                timeout=20
 
+            )
 
-def get_last_five(team_id, before_date):
-    # Una sola llamada por equipo; se consulta solo para un máximo pequeño de partidos.
-    rows = api_get("fixtures", {
-        "team": team_id,
-        "last": 5,
-        "status": "FT",
-        "timezone": "America/Tegucigalpa"
-    })
-    # El endpoint puede devolver los últimos partidos completados, independientemente
-    # de la fecha local; excluir por seguridad los que no estén terminados.
-    games = []
-    for item in rows:
-        fixture = item.get("fixture", {})
-        goals = item.get("goals", {})
-        home = item.get("teams", {}).get("home", {})
-        away = item.get("teams", {}).get("away", {})
-        if goals.get("home") is None or goals.get("away") is None:
-            continue
-        if home.get("id") == team_id:
-            gf, ga = goals["home"], goals["away"]
-        else:
-            gf, ga = goals["away"], goals["home"]
-        games.append((int(gf), int(ga)))
-    return games[:5]
+            remaining = response.headers.get(
 
+                "x-ratelimit-requests-remaining"
 
-def get_odds_for_fixture(fixture_id):
-    rows = api_get("odds", {"fixture": fixture_id})
-    found = []
-    for row in rows:
-        for bookmaker in row.get("bookmakers", []):
-            for bet in bookmaker.get("bets", []):
-                name = (bet.get("name") or "").lower()
-                for value in bet.get("values", []):
-                    label = (value.get("value") or "").strip()
-                    try:
-                        odd = float(value.get("odd"))
-                    except (TypeError, ValueError):
-                        continue
-                    if odd <= 1.0:
-                        continue
-                    # Normalizar nombres comunes de mercados.
-                    market = None
-                    pick = None
-                    if "both teams score" in name or name == "btts":
-                        if label.lower() == "yes":
-                            market, pick = "BTTS", "Ambos anotan: Sí"
-                    elif "over/under" in name or "goals over/under" in name or name == "goals":
-                        normalized = label.replace(",", ".").lower()
-                        if "over 1.5" in normalized:
-                            market, pick = "OVER15", "Más de 1.5 goles"
-                        elif "over 2.5" in normalized:
-                            market, pick = "OVER25", "Más de 2.5 goles"
-                        elif "under 3.5" in normalized:
-                            market, pick = "UNDER35", "Menos de 3.5 goles"
-                    if market:
-                        found.append({
-                            "market": market,
-                            "pick": pick,
-                            "odd": odd,
-                            "bookmaker": bookmaker.get("name", "Casa no identificada")
-                        })
-    # Mantener la cuota más alta disponible para cada mercado.
-    best = {}
-    for item in found:
-        if item["market"] not in best or item["odd"] > best[item["market"]]["odd"]:
-            best[item["market"]] = item
-    return list(best.values())
+            )
 
+            if remaining is not None:
 
-def safe_rate(values):
-    return sum(values) / len(values) if values else 0.0
+                try:
 
+                    self.remaining = int(remaining)
 
-def estimate_probability(market, home_games, away_games):
-    # Estimación heurística basada en resultados recientes. No es un modelo calibrado.
-    if len(home_games) < 3 or len(away_games) < 3:
+                except ValueError:
+
+                    pass
+
+            if response.status_code == 429:
+
+                log.error("API-Football alcanzó un límite. No se reintenta.")
+
+                return None
+
+            response.raise_for_status()
+
+            payload = response.json()
+
+            if payload.get("errors"):
+
+                log.warning("Error de API: %s", payload["errors"])
+
+                return None
+
+            result = payload.get("response", [])
+
+            self.cache[cache_key] = result
+
+            time.sleep(0.25)
+
+            return result
+
+        except (requests.RequestException, ValueError) as exc:
+
+            log.warning("Consulta fallida: %s", exc)
+
+            return None
+
+def poisson_over(total_xg, line):
+
+    """Probabilidad aproximada de superar una línea de goles."""
+
+    threshold = int(math.floor(line))
+
+    cumulative = 0.0
+
+    for goals in range(threshold + 1):
+
+        cumulative += (
+
+            math.exp(-total_xg)
+
+            * total_xg ** goals
+
+            / math.factorial(goals)
+
+        )
+
+    return max(0.0, min(1.0, 1.0 - cumulative))
+
+def extract_goals(fixture, team_id):
+
+    teams = fixture.get("teams", {})
+
+    goals = fixture.get("goals", {})
+
+    home = teams.get("home", {})
+
+    away = teams.get("away", {})
+
+    gh = goals.get("home")
+
+    ga = goals.get("away")
+
+    if gh is None or ga is None:
+
         return None
-    if market == "OVER15":
-        home_rate = sum(1 for gf, ga in home_games if gf + ga >= 2) / len(home_games)
-        away_rate = sum(1 for gf, ga in away_games if gf + ga >= 2) / len(away_games)
-        return 0.45 * home_rate + 0.45 * away_rate + 0.10 * 0.72
-    if market == "OVER25":
-        home_rate = sum(1 for gf, ga in home_games if gf + ga >= 3) / len(home_games)
-        away_rate = sum(1 for gf, ga in away_games if gf + ga >= 3) / len(away_games)
-        return 0.45 * home_rate + 0.45 * away_rate + 0.10 * 0.48
-    if market == "BTTS":
-        home_rate = sum(1 for gf, ga in home_games if gf > 0 and ga > 0) / len(home_games)
-        away_rate = sum(1 for gf, ga in away_games if gf > 0 and ga > 0) / len(away_games)
-        return 0.45 * home_rate + 0.45 * away_rate + 0.10 * 0.50
-    if market == "UNDER35":
-        home_rate = sum(1 for gf, ga in home_games if gf + ga <= 3) / len(home_games)
-        away_rate = sum(1 for gf, ga in away_games if gf + ga <= 3) / len(away_games)
-        return 0.45 * home_rate + 0.45 * away_rate + 0.10 * 0.70
+
+    if team_id == home.get("id"):
+
+        return int(gh), int(ga), True
+
+    if team_id == away.get("id"):
+
+        return int(ga), int(gh), False
+
     return None
 
+def recent_stats(api, team_id):
 
-def form_text(games):
-    if not games:
-        return "sin datos"
-    avg_for = safe_rate([gf for gf, ga in games])
-    avg_against = safe_rate([ga for gf, ga in games])
-    return f"{avg_for:.2f} a favor / {avg_against:.2f} en contra por partido"
+    fixtures = api.get(
 
+        "/fixtures",
 
-def league_priority(league_name, country):
-    """Prioriza competiciones conocidas sin excluir automáticamente otras ligas."""
-    text = f"{league_name} {country}".lower()
-    priority_terms = [
-        ("champions league", 100), ("premier league", 95), ("la liga", 95),
-        ("serie a", 95), ("bundesliga", 95), ("ligue 1", 90),
-        ("europa league", 90), ("conference league", 85),
-        ("libertadores", 90), ("sudamericana", 85),
-        ("brasileirão", 85), ("brasileirao", 85), ("copa do brasil", 80),
-        ("eredivisie", 80), ("primeira liga", 80), ("mls", 75),
-        ("liga mx", 75), ("primera división", 75), ("primera division", 75),
-        ("world cup", 95), ("qualifier", 75), ("qualifying", 75)
-    ]
-    for term, score in priority_terms:
-        if term in text:
-            return score
-    # Otras competiciones siguen siendo elegibles, pero quedan detrás de las prioritarias.
-    return 40
+        {"team": team_id, "last": RECENT_MATCHES}
 
+    )
+
+    if not fixtures:
+
+        return None
+
+    scored, conceded = [], []
+
+    home_scored, home_conceded = [], []
+
+    away_scored, away_conceded = [], []
+
+    for fixture in fixtures:
+
+        status = fixture.get("fixture", {}).get("status", {}).get("short")
+
+        if status not in ("FT", "AET", "PEN"):
+
+            continue
+
+        values = extract_goals(fixture, team_id)
+
+        if values is None:
+
+            continue
+
+        gf, ga, is_home = values
+
+        scored.append(gf)
+
+        conceded.append(ga)
+
+        if is_home:
+
+            home_scored.append(gf)
+
+            home_conceded.append(ga)
+
+        else:
+
+            away_scored.append(gf)
+
+            away_conceded.append(ga)
+
+    if len(scored) < 5:
+
+        return None
+
+    return {
+
+        "n": len(scored),
+
+        "gf": sum(scored) / len(scored),
+
+        "ga": sum(conceded) / len(conceded),
+
+        "hgf": (
+
+            sum(home_scored) / len(home_scored)
+
+            if home_scored else None
+
+        ),
+
+        "hga": (
+
+            sum(home_conceded) / len(home_conceded)
+
+            if home_conceded else None
+
+        ),
+
+        "agf": (
+
+            sum(away_scored) / len(away_scored)
+
+            if away_scored else None
+
+        ),
+
+        "aga": (
+
+            sum(away_conceded) / len(away_conceded)
+
+            if away_conceded else None
+
+        ),
+
+    }
+
+def estimate_goals(home, away):
+
+    home_attack = 0.65 * (
+
+        home["hgf"] if home["hgf"] is not None else home["gf"]
+
+    ) + 0.35 * home["gf"]
+
+    away_defence = 0.65 * (
+
+        away["aga"] if away["aga"] is not None else away["ga"]
+
+    ) + 0.35 * away["ga"]
+
+    away_attack = 0.65 * (
+
+        away["agf"] if away["agf"] is not None else away["gf"]
+
+    ) + 0.35 * away["gf"]
+
+    home_defence = 0.65 * (
+
+        home["hga"] if home["hga"] is not None else home["ga"]
+
+    ) + 0.35 * home["ga"]
+
+    home_xg = max(0.05, (home_attack + away_defence) / 2)
+
+    away_xg = max(0.05, (away_attack + home_defence) / 2)
+
+    return home_xg, away_xg
+
+def get_over_odds(api, fixture_id):
+
+    odds_data = api.get("/odds", {"fixture": fixture_id})
+
+    odds = {}
+
+    if not odds_data:
+
+        return odds
+
+    for entry in odds_data:
+
+        for bookmaker in entry.get("bookmakers", []):
+
+            for bet in bookmaker.get("bets", []):
+
+                name = (bet.get("name") or "").lower()
+
+                if "total" not in name and "over/under" not in name:
+
+                    continue
+
+                for value in bet.get("values", []):
+
+                    label = (value.get("value") or "").lower()
+
+                    label = label.replace(" ", "")
+
+                    for line in (0.5, 1.5, 2.5, 3.5, 4.5):
+
+                        if label in (f"over{line}", f"over{line:.1f}"):
+
+                            try:
+
+                                odds[line] = float(value["odd"])
+
+                            except (KeyError, TypeError, ValueError):
+
+                                pass
+
+    return odds
+
+def send_telegram(message):
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
+    if not token or not chat_id:
+
+        log.error("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID.")
+
+        return False
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+
+    try:
+
+        response = requests.post(
+
+            url,
+
+            json={
+
+                "chat_id": chat_id,
+
+                "text": message,
+
+                "disable_web_page_preview": True
+
+            },
+
+            timeout=20
+
+        )
+
+        response.raise_for_status()
+
+        return bool(response.json().get("ok"))
+
+    except (requests.RequestException, ValueError) as exc:
+
+        log.error("Error de Telegram: %s", exc)
+
+        return False
 
 def main():
-    date_str = local_date()
-    print("=" * 58)
-    print(f"BOT DE ALERTAS DE FÚTBOL — {date_str} (Honduras)")
-    print("=" * 58)
 
-    if not API_KEY:
-        raise RuntimeError("Configura el secreto API_FOOTBALL_KEY en GitHub.")
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print("Aviso: faltan secretos de Telegram; el resultado solo aparecerá en el log.")
+    key = os.getenv("API_FOOTBALL_KEY", "").strip()
 
-    fixtures = get_fixtures(date_str)
-    upcoming = []
-    for item in fixtures:
-        fixture = item.get("fixture", {})
-        status = fixture.get("status", {}).get("short", "")
+    if not key:
+
+        log.error("Falta API_FOOTBALL_KEY.")
+
+        sys.exit(1)
+
+    today = datetime.now(TZ).date().isoformat()
+
+    log.info("Analizando partidos del día: %s", today)
+
+    api = FootballAPI(key)
+
+    fixtures = api.get("/fixtures", {"date": today})
+
+    if fixtures is None:
+
+        log.error("No se pudo recuperar la cartelera.")
+
+        sys.exit(1)
+
+    matches = []
+
+    for fixture in fixtures:
+
+        league = fixture.get("league", {})
+
+        if league.get("id") not in LEAGUES:
+
+            continue
+
+        status = fixture.get("fixture", {}).get("status", {}).get("short")
+
         if status not in ("NS", "TBD"):
+
             continue
-        home = item.get("teams", {}).get("home", {})
-        away = item.get("teams", {}).get("away", {})
+
+        teams = fixture.get("teams", {})
+
+        home = teams.get("home", {})
+
+        away = teams.get("away", {})
+
         if not home.get("id") or not away.get("id"):
+
             continue
-        league = item.get("league", {})
-        upcoming.append({
-            "id": fixture.get("id"),
-            "timestamp": fixture.get("timestamp", 0),
+
+        matches.append({
+
+            "id": fixture.get("fixture", {}).get("id"),
+
+            "date": fixture.get("fixture", {}).get("date", ""),
+
+            "league": LEAGUES[league["id"]],
+
             "home": home,
-            "away": away,
-            "league": league.get("name", "Liga no identificada"),
-            "country": league.get("country", ""),
-            "fixture": fixture
+
+            "away": away
+
         })
-    # Primero competiciones de mayor interés; dentro de cada nivel, los partidos más próximos.
-    upcoming.sort(key=lambda x: (-league_priority(x["league"], x["country"]), x["timestamp"]))
 
-    if not upcoming:
-        telegram(f"⚽ <b>BOT DE FÚTBOL — {date_str}</b>\nNo encontré partidos pendientes para hoy en la respuesta de la API.")
-        print("No hay partidos pendientes.")
-        return
+    # Orden reproducible y límite para proteger el cupo de la API.
 
-    # Límite deliberado para proteger la cuota diaria. Cada partido puede requerir
-    # una consulta de cuotas y dos consultas de forma reciente.
-    candidates = upcoming[:MAX_FIXTURES_TO_CHECK]
-    print(f"Partidos pendientes encontrados: {len(upcoming)}")
-    print(f"Partidos seleccionados para análisis detallado: {len(candidates)}")
+    matches.sort(key=lambda m: m["date"])
+
+    matches = matches[:MAX_MATCHES]
+
+    team_cache = {}
+
     picks = []
 
-    for idx, game in enumerate(candidates, 1):
-        try:
-            print(f"[{idx}/{len(candidates)}] {game['home'].get('name')} vs {game['away'].get('name')}")
-            odds = get_odds_for_fixture(game["id"])
-            if not odds:
-                print("  Sin cuotas compatibles.")
-                continue
+    for match in matches:
 
-            home_games = get_last_five(game["home"]["id"], date_str)
-            away_games = get_last_five(game["away"]["id"], date_str)
+        home_id = match["home"]["id"]
 
-            for odd in odds:
-                price = odd["odd"]
-                if price <= MIN_ODD or price > MAX_ODD:
-                    continue
-                probability = estimate_probability(odd["market"], home_games, away_games)
-                if probability is None:
-                    continue
-                implied = 1.0 / price
-                edge = probability - implied
-                if probability >= MIN_PROB and edge >= MIN_EDGE:
-                    kickoff = datetime.fromtimestamp(
-                        game["timestamp"], timezone.utc
-                    ).astimezone(timezone(timedelta(hours=TIMEZONE_OFFSET))).strftime("%H:%M")
-                    picks.append({
-                        **odd,
-                        "home": game["home"].get("name", "Local"),
-                        "away": game["away"].get("name", "Visitante"),
-                        "league": game["league"],
-                        "country": game["country"],
-                        "kickoff": kickoff,
-                        "probability": probability,
-                        "implied": implied,
-                        "edge": edge,
-                        "home_form": form_text(home_games),
-                        "away_form": form_text(away_games)
-                    })
-        except Exception as exc:
-            print(f"  Error en este partido: {exc}")
-            if "límite de solicitudes" in str(exc).lower() or "429" in str(exc):
-                telegram("🛑 <b>BOT DETENIDO</b>\nLa API de fútbol alcanzó su límite de solicitudes. No se harán más consultas en esta ejecución.")
-                return
+        away_id = match["away"]["id"]
 
-    picks.sort(key=lambda p: (p["edge"], p["probability"]), reverse=True)
+        if home_id not in team_cache:
+
+            team_cache[home_id] = recent_stats(api, home_id)
+
+        if away_id not in team_cache:
+
+            team_cache[away_id] = recent_stats(api, away_id)
+
+        home = team_cache[home_id]
+
+        away = team_cache[away_id]
+
+        if not home or not away:
+
+            continue
+
+        home_xg, away_xg = estimate_goals(home, away)
+
+        total_xg = home_xg + away_xg
+
+        if total_xg < MIN_EXPECTED_GOALS:
+
+            continue
+
+        qualifying = []
+
+        for line in (0.5, 1.5, 2.5, 3.5, 4.5):
+
+            probability = poisson_over(total_xg, line)
+
+            if probability >= MIN_PROBABILITY:
+
+                qualifying.append((line, probability))
+
+        if not qualifying:
+
+            continue
+
+        # La línea con más goles que todavía supera el umbral de
+
+        # probabilidad se prefiere para no elegir siempre Over 0.5.
+
+        line, probability = max(qualifying, key=lambda item: item[0])
+
+        # Consultar cuotas solo para los candidatos seleccionados.
+
+        odds = get_over_odds(api, match["id"])
+
+        picks.append({
+
+            **match,
+
+            "line": line,
+
+            "probability": probability,
+
+            "total_xg": total_xg,
+
+            "home_xg": home_xg,
+
+            "away_xg": away_xg,
+
+            "odds": odds,
+
+            "home_stats": home,
+
+            "away_stats": away
+
+        })
+
+    picks.sort(
+
+        key=lambda p: (p["probability"], p["total_xg"]),
+
+        reverse=True
+
+    )
+
     picks = picks[:MAX_ALERTS]
 
+    log.info("Consultas API usadas: %s", api.calls)
+
     if not picks:
-        message = (
-            f"⚽ <b>ESCÁNER DE FÚTBOL — {date_str}</b>\n\n"
-            f"Partidos pendientes: {len(upcoming)}\n"
-            f"Partidos revisados: {len(candidates)}\n\n"
-            "No encontré picks que cumplan todos los filtros hoy.\n"
-            f"Filtros: cuota > {MIN_ODD:.2f} y ≤ {MAX_ODD:.2f}, probabilidad estimada ≥ {MIN_PROB:.0%}, "
-            f"edge ≥ {MIN_EDGE:.0%}.\n\n"
-            "No apostar también es una decisión válida."
-        )
-        telegram(message)
-        print(message)
+
+        log.info("No hay picks que cumplan los filtros. No se envía apuesta.")
+
         return
 
-    lines = [f"⚽ <b>MEJORES PICKS DEL DÍA — {date_str}</b>",
-             f"Revisados: {len(candidates)} de {len(upcoming)} partidos",
-             "Probabilidades heurísticas basadas en últimos 5 partidos; no garantizan resultados.\n"]
-    for i, p in enumerate(picks, 1):
-        lines.extend([
-            f"🏆 <b>#{i} {p['home']} vs {p['away']}</b>",
-            f"🏟️ {p['league']} {('· ' + p['country']) if p['country'] else ''} | ⏰ {p['kickoff']} (Honduras)",
-            f"🎯 {p['pick']}",
-            f"💰 Cuota: <b>{p['odd']:.2f}</b> ({p['bookmaker']})",
-            f"📈 Prob. estimada: {p['probability']:.1%} | Implícita: {p['implied']:.1%}",
-            f"💎 Edge estimado: {p['edge']:+.1%}",
-            f"📊 Local últimos 5: {p['home_form']}",
-            f"📊 Visitante últimos 5: {p['away_form']}",
-            "—"
-        ])
-    lines.append("⚠️ Solo análisis estadístico; no existe apuesta segura. Verifica que la cuota siga disponible.")
-    message = "\n".join(lines)
-    telegram(message)
-    print(message)
-    print(f"Solicitudes API en esta ejecución: {request_count}")
+    message = [
 
+        f"⚽ ALERTAS DE GOLES — {today}",
+
+        f"Picks seleccionados: {len(picks)}",
+
+        ""
+
+    ]
+
+    for i, p in enumerate(picks, 1):
+
+        odd = p["odds"].get(p["line"])
+
+        odd_text = f"{odd:.2f}" if odd is not None else "No disponible"
+
+        message.extend([
+
+            f"🏆 #{i} {p['home']['name']} vs {p['away']['name']}",
+
+            f"🏟️ {p['league']}",
+
+            f"🕒 Inicio: {p['date'].replace('T', ' ')[:16]} UTC",
+
+            f"🎯 Pick: Over {p['line']:.1f} goles",
+
+            f"💰 Cuota: {odd_text}",
+
+            f"📈 Probabilidad estimada: {p['probability'] * 100:.1f}%",
+
+            f"⚽ Goles esperados estimados: {p['total_xg']:.2f}",
+
+            f"Local: GF {p['home_stats']['gf']:.2f}, "
+
+            f"GC {p['home_stats']['ga']:.2f} por partido.",
+
+            f"Visitante: GF {p['away_stats']['gf']:.2f}, "
+
+            f"GC {p['away_stats']['ga']:.2f} por partido.",
+
+            ""
+
+        ])
+
+    message.append(
+
+        "Nota: estimación orientativa basada en goles recientes; "
+
+        "no es garantía. xG real y tiros a puerta no se inventan "
+
+        "si la API no los proporciona."
+
+    )
+
+    if not send_telegram("\n".join(message)):
+
+        sys.exit(1)
+
+    log.info("Alerta enviada correctamente.")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        print(f"ERROR FATAL: {exc}")
-        try:
-            telegram(f"🛑 <b>BOT DE FÚTBOL</b>\nLa ejecución terminó con error:\n{str(exc)[:700]}")
-        except Exception:
-            pass
-        raise
+
+    main()
