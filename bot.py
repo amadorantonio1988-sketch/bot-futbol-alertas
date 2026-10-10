@@ -119,49 +119,49 @@ def poisson_over(total_goals, line=2.5):
 
 
 def get_team_venue_stats(api, team_id, venue):
-    """Toma los últimos 10 partidos terminados en casa o fuera, según corresponda."""
-    rows = api.get("/fixtures", {"team": team_id, "last": 20})
+    """Obtiene partidos recientes sin usar el parámetro `last` (no permitido en el plan gratuito)."""
+    today = datetime.now(TZ).date()
+    date_from = (today.replace(year=today.year - 1)).isoformat()
+    date_to = today.isoformat()
+    rows = api.get("/fixtures", {
+        "team": team_id,
+        "from": date_from,
+        "to": date_to,
+        "timezone": "America/Tegucigalpa",
+    })
     if rows is None:
         return None
 
-    def select_venue(fixtures):
-        selected = []
-        # La API normalmente devuelve primero los más recientes; ordenamos por fecha
-        # descendente para garantizar que se tomen los últimos partidos disputados.
-        fixtures = sorted(
-            fixtures,
-            key=lambda f: (f.get("fixture", {}).get("date") or ""),
-            reverse=True,
-        )
-        for fixture in fixtures:
-            status = (fixture.get("fixture", {}).get("status") or {}).get("short")
-            if status not in ("FT", "AET", "PEN"):
-                continue
-            teams = fixture.get("teams") or {}
-            goals = fixture.get("goals") or {}
-            home = teams.get("home") or {}
-            away = teams.get("away") or {}
-            home_goals, away_goals = goals.get("home"), goals.get("away")
-            if home_goals is None or away_goals is None:
-                continue
-            if venue == "home" and home.get("id") == team_id:
-                selected.append((int(home_goals), int(away_goals)))
-            elif venue == "away" and away.get("id") == team_id:
-                selected.append((int(away_goals), int(home_goals)))
-            if len(selected) == RECENT_VENUE_MATCHES:
-                break
-        return selected
-
-    selected = select_venue(rows)
-    if len(selected) < RECENT_VENUE_MATCHES and not api.stopped:
-        wider = api.get("/fixtures", {"team": team_id, "last": 50})
-        if wider:
-            selected = select_venue(wider)
+    selected = []
+    # Ordena del más reciente al más antiguo y conserva solo partidos terminados
+    # en la condición solicitada (local en casa / visitante fuera).
+    rows = sorted(
+        rows,
+        key=lambda f: (f.get("fixture", {}).get("date") or ""),
+        reverse=True,
+    )
+    for fixture in rows:
+        status = (fixture.get("fixture", {}).get("status") or {}).get("short")
+        if status not in ("FT", "AET", "PEN"):
+            continue
+        teams = fixture.get("teams") or {}
+        goals = fixture.get("goals") or {}
+        home = teams.get("home") or {}
+        away = teams.get("away") or {}
+        home_goals, away_goals = goals.get("home"), goals.get("away")
+        if home_goals is None or away_goals is None:
+            continue
+        if venue == "home" and home.get("id") == team_id:
+            selected.append((int(home_goals), int(away_goals)))
+        elif venue == "away" and away.get("id") == team_id:
+            selected.append((int(away_goals), int(home_goals)))
+        if len(selected) == RECENT_VENUE_MATCHES:
+            break
 
     if len(selected) < RECENT_VENUE_MATCHES:
         log.info(
-            "Equipo ID %s (%s): solo hay %s de los 10 partidos requeridos en esa condición; se omite.",
-            team_id, venue, len(selected)
+            "Equipo ID %s (%s): solo hay %s partidos válidos en esa condición dentro de los últimos 12 meses; se necesitan %s.",
+            team_id, venue, len(selected), RECENT_VENUE_MATCHES
         )
         return None
 
