@@ -1,47 +1,73 @@
-steps:
 
-  - name: Descargar repositorio
 
-    uses: actions/checkout@v4
+name: Bot fútbol alertas
 
-  - name: Configurar Python
+on:
 
-    uses: actions/setup-python@v5
+  workflow_dispatch:
 
-    with:
+  schedule:
 
-      python-version: '3.11'
+    - cron: '15 12 * * *'
 
-  - name: Instalar dependencias
+    - cron: '0 15 * * *'
 
-    run: |
+    - cron: '0 18 * * *'
 
-      python -m pip install --upgrade pip
+    - cron: '0 21 * * *'
 
-      pip install -r requirements.txt
+jobs:
 
-  - name: Verificar configuración
+  run-bot:
 
-    env:
+    runs-on: ubuntu-latest
 
-      OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
+    timeout-minutes: 10
 
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    steps:
 
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Descargar repositorio
 
-    run: |
+        uses: actions/checkout@v4
 
-      python -c "import os, sys; names=['OPENFOOT_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID']; missing=[n for n in names if not os.getenv(n)]; print('Faltan secretos: '+', '.join(missing) if missing else 'Los tres secretos están configurados'); sys.exit(1 if missing else 0)"
+      - name: Configurar Python
 
-  - name: Ejecutar bot de fútbol
+        uses: actions/setup-python@v5
 
-    env:
+        with:
 
-      OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
+          python-version: '3.11'
 
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      - name: Instalar dependencias
 
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
 
-    run: python bot.py
+          python -m pip install --upgrade pip
+
+          pip install -r requirements.txt
+
+      - name: Verificar configuración
+
+        env:
+
+          OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+        run: |
+
+          python -c "import os,sys; names=['OPENFOOT_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID']; missing=[n for n in names if not os.getenv(n)]; print('Faltan secretos: '+', '.join(missing) if missing else 'Los tres secretos están configurados'); sys.exit(1 if missing else 0)"
+
+      - name: Ejecutar bot de fútbol
+
+        env:
+
+          OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+        run: python bot.py
