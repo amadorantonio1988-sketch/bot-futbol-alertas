@@ -15,7 +15,7 @@ TZ = ZoneInfo("America/Tegucigalpa")
 MAX_API_CALLS = int(os.getenv("MAX_API_CALLS", "60"))
 MAX_ALERTS = int(os.getenv("MAX_ALERTS", "5"))
 MAX_MATCHES_TO_ANALYZE = int(os.getenv("MAX_MATCHES_TO_ANALYZE", "10"))
-RECENT_VENUE_MATCHES = 10
+RECENT_TEAM_MATCHES = 10
 MIN_PROBABILITY = float(os.getenv("MIN_PROBABILITY", "0.70"))
 MIN_ODDS = float(os.getenv("MIN_ODDS", "1.50"))  # superior a 1.49
 REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "0.25"))
@@ -118,65 +118,81 @@ def poisson_over(total_goals, line=2.5):
     return max(0.0, min(1.0, 1.0 - cumulative))
 
 
-def get_team_venue_stats(api, team_id, venue):
-    """Obtiene partidos recientes sin usar el parámetro `last` (no permitido en el plan gratuito)."""
+def get_team_recent_stats(api, team_id):
+    """Calcula estadísticas de los últimos 10 partidos del equipo, en cualquier condición."""
     today = datetime.now(TZ).date()
-    date_from = (today.replace(year=today.year - 1)).isoformat()
+    from datetime import timedelta
+    date_from = (today - timedelta(days=365)).isoformat()
     date_to = today.isoformat()
-    rows = api.get("/fixtures", {
-        "team": team_id,
-        "from": date_from,
-        "to": date_to,
-        "timezone": "America/Tegucigalpa",
-    })
-    if rows is None:
-        return None
+    collected = {}
 
-    selected = []
-    # Ordena del más reciente al más antiguo y conserva solo partidos terminados
-    # en la condición solicitada (local en casa / visitante fuera).
-    rows = sorted(
-        rows,
-        key=lambda f: (f.get("fixture", {}).get("date") or ""),
-        reverse=True,
-    )
-    for fixture in rows:
-        status = (fixture.get("fixture", {}).get("status") or {}).get("short")
-        if status not in ("FT", "AET", "PEN"):
+    # La API gratuita exige season y no permite el parámetro `last`.
+    # Consultamos la temporada actual y, si hace falta, la anterior para completar la muestra.
+    for season in (today.year, today.year - 1):
+        rows = api.get("/fixtures", {
+            "team": team_id,
+            "season": season,
+            "from": date_from,
+            "to": date_to,
+            "timezone": "America/Tegucigalpa",
+        })
+        if rows is None:
+            # Si la API se detuvo por límite/error, no continuar haciendo llamadas.
+            if api.stopped or api.calls >= MAX_API_CALLS:
+                break
             continue
-        teams = fixture.get("teams") or {}
-        goals = fixture.get("goals") or {}
-        home = teams.get("home") or {}
-        away = teams.get("away") or {}
-        home_goals, away_goals = goals.get("home"), goals.get("away")
-        if home_goals is None or away_goals is None:
-            continue
-        if venue == "home" and home.get("id") == team_id:
-            selected.append((int(home_goals), int(away_goals)))
-        elif venue == "away" and away.get("id") == team_id:
-            selected.append((int(away_goals), int(home_goals)))
-        if len(selected) == RECENT_VENUE_MATCHES:
+
+        for fixture in rows:
+            fixture_id = (fixture.get("fixture") or {}).get("id")
+            status = ((fixture.get("fixture") or {}).get("status") or {}).get("short")
+            if not fixture_id or status not in ("FT", "AET", "PEN"):
+                continue
+            teams = fixture.get("teams") or {}
+            goals = fixture.get("goals") or {}
+            home = teams.get("home") or {}
+            away = teams.get("away") or {}
+            home_goals, away_goals = goals.get("home"), goals.get("away")
+            if home_goals is None or away_goals is None:
+                continue
+
+            if home.get("id") == team_id:
+                gf, ga = int(home_goals), int(away_goals)
+            elif away.get("id") == team_id:
+                gf, ga = int(away_goals), int(home_goals)
+            else:
+                continue
+            collected[fixture_id] = {
+                "date": (fixture.get("fixture") or {}).get("date") or "",
+                "gf": gf,
+                "ga": ga,
+            }
+
+        if len(collected) >= RECENT_TEAM_MATCHES:
+            break
+        if api.stopped or api.calls >= MAX_API_CALLS:
             break
 
-    if len(selected) < RECENT_VENUE_MATCHES:
+    recent = sorted(collected.values(), key=lambda row: row["date"], reverse=True)[:RECENT_TEAM_MATCHES]
+    if len(recent) < RECENT_TEAM_MATCHES:
         log.info(
-            "Equipo ID %s (%s): solo hay %s partidos válidos en esa condición dentro de los últimos 12 meses; se necesitan %s.",
-            team_id, venue, len(selected), RECENT_VENUE_MATCHES
+            "Equipo ID %s: solo se obtuvieron %s partidos generales válidos; se necesitan %s.",
+            team_id, len(recent), RECENT_TEAM_MATCHES
         )
         return None
 
-    total_goals = [gf + ga for gf, ga in selected]
+    totals = [row["gf"] + row["ga"] for row in recent]
     return {
-        "n": len(selected),
-        "gf": sum(gf for gf, _ in selected) / len(selected),
-        "ga": sum(ga for _, ga in selected) / len(selected),
-        "over25_rate": sum(total >= 3 for total in total_goals) / len(total_goals),
-        "over25_count": sum(total >= 3 for total in total_goals),
+        "n": len(recent),
+        "gf": sum(row["gf"] for row in recent) / len(recent),
+        "ga": sum(row["ga"] for row in recent) / len(recent),
+        "over25_rate": sum(total >= 3 for total in totals) / len(totals),
+        "over25_count": sum(total >= 3 for total in totals),
     }
 
 
 def estimate_expected_goals(home_stats, away_stats):
-    # Ataque local en casa vs. goles que concede el visitante fuera, y viceversa.
+    # Estima goles con las medias generales de los últimos 10 partidos de cada equipo,
+    # sin separar sus resultados como local o visitante.
     home_xg = max(0.05, (home_stats["gf"] + away_stats["ga"]) / 2)
     away_xg = max(0.05, (away_stats["gf"] + home_stats["ga"]) / 2)
     return home_xg, away_xg
@@ -243,7 +259,7 @@ def main():
 
     today = datetime.now(TZ).date().isoformat()
     log.info("Fecha Honduras: %s", today)
-    log.info("Filtros: Over 2.5, probabilidad estimada >= %.1f%%, cuota >= %.2f; máximo %d alertas.",
+    log.info("Filtros: Over 2.5, últimos 10 partidos generales por equipo, probabilidad estimada >= %.1f%%, cuota >= %.2f; máximo %d alertas.",
              MIN_PROBABILITY * 100, MIN_ODDS, MAX_ALERTS)
 
     api = FootballAPI(api_key)
@@ -291,14 +307,14 @@ def main():
             log.warning("Se detiene el análisis por presupuesto de API.")
             break
         home_id, away_id = match["home"]["id"], match["away"]["id"]
-        home_key, away_key = (home_id, "home"), (away_id, "away")
+        home_key, away_key = home_id, away_id
         if home_key not in team_cache:
-            team_cache[home_key] = get_team_venue_stats(api, home_id, "home")
+            team_cache[home_key] = get_team_recent_stats(api, home_id)
         if away_key not in team_cache:
-            team_cache[away_key] = get_team_venue_stats(api, away_id, "away")
+            team_cache[away_key] = get_team_recent_stats(api, away_id)
         home_stats, away_stats = team_cache[home_key], team_cache[away_key]
         if not home_stats or not away_stats:
-            log.info("Se omite %s vs %s: no se obtuvieron 10 partidos válidos en la condición requerida.",
+            log.info("Se omite %s vs %s: no se obtuvieron 10 partidos generales válidos.",
                      match["home"].get("name"), match["away"].get("name"))
             continue
 
@@ -346,8 +362,8 @@ def main():
             f"💰 Cuota Over 2.5: {pick['odd']:.2f}",
             f"📈 Probabilidad estimada: {pick['probability'] * 100:.1f}%",
             f"⚽ Goles esperados estimados: {pick['total_xg']:.2f} (local {pick['home_xg']:.2f} + visitante {pick['away_xg']:.2f})",
-            f"🏠 Local, últimos 10 en casa: GF {pick['home_stats']['gf']:.2f}, GC {pick['home_stats']['ga']:.2f}; Over 2.5 en {pick['home_stats']['over25_rate'] * 100:.0f}% ({pick['home_stats']['over25_count']}/10).",
-            f"✈️ Visitante, últimos 10 fuera: GF {pick['away_stats']['gf']:.2f}, GC {pick['away_stats']['ga']:.2f}; Over 2.5 en {pick['away_stats']['over25_rate'] * 100:.0f}% ({pick['away_stats']['over25_count']}/10).",
+            f"📊 {pick['home'].get('name')}, últimos 10 partidos generales: GF {pick['home_stats']['gf']:.2f}, GC {pick['home_stats']['ga']:.2f}; Over 2.5 en {pick['home_stats']['over25_rate'] * 100:.0f}% ({pick['home_stats']['over25_count']}/10).",
+            f"📊 {pick['away'].get('name')}, últimos 10 partidos generales: GF {pick['away_stats']['gf']:.2f}, GC {pick['away_stats']['ga']:.2f}; Over 2.5 en {pick['away_stats']['over25_rate'] * 100:.0f}% ({pick['away_stats']['over25_count']}/10).",
             "",
         ])
     message.append(
