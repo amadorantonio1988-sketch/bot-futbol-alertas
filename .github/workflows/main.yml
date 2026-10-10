@@ -8,21 +8,31 @@ on:
 
   schedule:
 
-    - cron: '15 12 * * *'
+    - cron: "15 12 * * *"
 
-    - cron: '0 15 * * *'
+    - cron: "0 15 * * *"
 
-    - cron: '0 18 * * *'
+    - cron: "0 18 * * *"
 
-    - cron: '0 21 * * *'
+    - cron: "0 21 * * *"
+
+permissions:
+
+  contents: read
 
 jobs:
 
-  run-bot:
+  bot-futbol:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 10
+    env:
+
+      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
 
@@ -36,7 +46,7 @@ jobs:
 
         with:
 
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Instalar dependencias
 
@@ -46,28 +56,16 @@ jobs:
 
           pip install -r requirements.txt
 
-      - name: Verificar configuración
-
-        env:
-
-          OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
-
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Verificar secretos
 
         run: |
 
-          python -c "import os,sys; names=['OPENFOOT_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID']; missing=[n for n in names if not os.getenv(n)]; print('Faltan secretos: '+', '.join(missing) if missing else 'Los tres secretos están configurados'); sys.exit(1 if missing else 0)"
+          test -n "$THE_ODDS_API_KEY" || (echo "Falta THE_ODDS_API_KEY" && exit 1)
 
-      - name: Ejecutar bot de fútbol
+          test -n "$TELEGRAM_BOT_TOKEN" || (echo "Falta TELEGRAM_BOT_TOKEN" && exit 1)
 
-        env:
+          test -n "$TELEGRAM_CHAT_ID" || (echo "Falta TELEGRAM_CHAT_ID" && exit 1)
 
-          OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
-
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Ejecutar bot
 
         run: python bot.py
