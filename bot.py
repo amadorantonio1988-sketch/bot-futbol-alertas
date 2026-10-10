@@ -1,158 +1,68 @@
+
+
 import os
-
-import math
-
-import time
-
-from datetime import datetime, timedelta, timezone
-
-from zoneinfo import ZoneInfo
 
 import requests
 
-# ==================================================
+from datetime import datetime, timezone
 
-# BOT DE ALERTAS DE FUTBOL - SOLO OVER 2.5 GOLES
+from zoneinfo import ZoneInfo
 
-# ==================================================
+# ==========================================
 
-OPENFOOT_API_KEY = os.getenv("OPENFOOT_API_KEY", "").strip()
+# BOT FUTBOL: OVER 2.5 + CUOTAS + TELEGRAM
+
+# Fuente de cuotas: The Odds API
+
+# ==========================================
+
+ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "").strip()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-BASE_URL = "https://openfootapi.com/v1"
+BASE_URL = "https://api.the-odds-api.com/v4"
 
 LOCAL_TZ = ZoneInfo("America/Tegucigalpa")
 
-MIN_PROBABILITY = 0.60
-
 MIN_ODD = 1.50
+
+MIN_PROBABILITY = 0.60
 
 MAX_ALERTS = 5
 
-HISTORY_SIZE = 10
+# Competiciones disponibles en The Odds API.
+
+SPORTS = [
+
+    "soccer_epl",
+
+    "soccer_spain_la_liga",
+
+    "soccer_germany_bundesliga",
+
+    "soccer_italy_serie_a",
+
+    "soccer_france_ligue_one",
+
+    "soccer_netherlands_eredivisie",
+
+    "soccer_portugal_primeira_liga",
+
+    "soccer_brazil_campeonato",
+
+    "soccer_usa_mls",
+
+    "soccer_mexico_ligamx",
+
+    "soccer_argentina_primera_division",
+
+]
 
 session = requests.Session()
 
-history_cache = {}
-
-# Banderas por país o competición.
-
-COUNTRY_FLAGS = {
-
-    "spain": "🇪🇸", "españa": "🇪🇸", "espana": "🇪🇸",
-
-    "brazil": "🇧🇷", "brasil": "🇧🇷",
-
-    "honduras": "🇭🇳",
-
-    "england": "🏴", "inglaterra": "🏴",
-
-    "italy": "🇮🇹", "italia": "🇮🇹",
-
-    "germany": "🇩🇪", "alemania": "🇩🇪",
-
-    "france": "🇫🇷", "francia": "🇫🇷",
-
-    "portugal": "🇵🇹",
-
-    "netherlands": "🇳🇱", "holanda": "🇳🇱",
-
-    "argentina": "🇦🇷",
-
-    "mexico": "🇲🇽", "méxico": "🇲🇽", "mexico": "🇲🇽",
-
-    "peru": "🇵🇪", "perú": "🇵🇪",
-
-    "colombia": "🇨🇴",
-
-    "chile": "🇨🇱",
-
-    "uruguay": "🇺🇾",
-
-    "united states": "🇺🇸", "usa": "🇺🇸",
-
-    "south korea": "🇰🇷", "korea": "🇰🇷",
-
-    "japan": "🇯🇵",
-
-    "scotland": "🏴",
-
-    "turkey": "🇹🇷", "türkiye": "🇹🇷",
-
-    "saudi arabia": "🇸🇦",
-
-    "switzerland": "🇨🇭",
-
-    "belgium": "🇧🇪",
-
-    "australia": "🇦🇺",
-
-    "international": "🌍",
-
-}
-
-def api_get(endpoint, params=None):
-
-    url = f"{BASE_URL}/{endpoint.lstrip('/')}"
-
-    headers = {
-
-        "Accept": "application/json",
-
-        "Authorization": f"Bearer {OPENFOOT_API_KEY}",
-
-    }
-
-    for attempt in range(3):
-
-        try:
-
-            response = session.get(
-
-                url, headers=headers, params=params or {}, timeout=20
-
-            )
-
-            if response.status_code == 429:
-
-                time.sleep(2 ** attempt)
-
-                continue
-
-            if response.status_code != 200:
-
-                print(
-
-                    f"OpenFoot HTTP {response.status_code}: "
-
-                    f"{response.text[:250]}"
-
-                )
-
-                return None
-
-            time.sleep(0.15)
-
-            return response.json()
-
-        except (requests.RequestException, ValueError) as error:
-
-            print("Error de OpenFoot:", error)
-
-            time.sleep(2 ** attempt)
-
-    return None
-
 def send_telegram(message):
-
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-
-        print("Faltan los secretos de Telegram.")
-
-        return False
 
     url = (
 
@@ -174,8 +84,6 @@ def send_telegram(message):
 
                 "text": message,
 
-                "parse_mode": "HTML",
-
                 "disable_web_page_preview": True,
 
             },
@@ -184,9 +92,13 @@ def send_telegram(message):
 
         )
 
-        if response.status_code != 200:
+        response.raise_for_status()
 
-            print("Error de Telegram:", response.text[:250])
+        data = response.json()
+
+        if not data.get("ok"):
+
+            print("Telegram rechazó el mensaje:", data)
 
             return False
 
@@ -194,9 +106,81 @@ def send_telegram(message):
 
     except requests.RequestException as error:
 
-        print("No se pudo enviar Telegram:", error)
+        print("Error enviando Telegram:", error)
 
         return False
+
+def get_odds(sport):
+
+    url = f"{BASE_URL}/sports/{sport}/odds/"
+
+    params = {
+
+        "apiKey": ODDS_API_KEY,
+
+        "regions": "uk,eu",
+
+        "markets": "totals",
+
+        "oddsFormat": "decimal",
+
+        "dateFormat": "iso",
+
+    }
+
+    try:
+
+        response = session.get(url, params=params, timeout=25)
+
+        if response.status_code == 401:
+
+            raise SystemExit(
+
+                "THE_ODDS_API_KEY no es válida o no está autorizada."
+
+            )
+
+        if response.status_code == 429:
+
+            raise SystemExit(
+
+                "The Odds API rechazó la petición por límite de uso."
+
+            )
+
+        if response.status_code in (404, 422):
+
+            print(f"Competición no disponible: {sport}")
+
+            return []
+
+        if response.status_code != 200:
+
+            print(
+
+                f"Error HTTP {response.status_code} en {sport}: "
+
+                f"{response.text[:200]}"
+
+            )
+
+            return []
+
+        remaining = response.headers.get(
+
+            "x-requests-remaining", "desconocido"
+
+        )
+
+        print(f"{sport}: consultas restantes según API: {remaining}")
+
+        return response.json()
+
+    except requests.RequestException as error:
+
+        print(f"Error consultando {sport}: {error}")
+
+        return []
 
 def parse_date(value):
 
@@ -212,319 +196,121 @@ def parse_date(value):
 
         return None
 
-def get_flag(match):
+def analyze_event(event):
 
-    competition = match.get("competition") or {}
+    kickoff = parse_date(event.get("commence_time"))
 
-    country = str(
+    now = datetime.now(timezone.utc)
 
-        competition.get("country")
+    today = datetime.now(LOCAL_TZ).date()
 
-        or match.get("country")
-
-        or ""
-
-    ).strip().lower()
-
-    if country in COUNTRY_FLAGS:
-
-        return COUNTRY_FLAGS[country]
-
-    home = match.get("homeTeam") or {}
-
-    country = str(home.get("country") or "").strip().lower()
-
-    if country in COUNTRY_FLAGS:
-
-        return COUNTRY_FLAGS[country]
-
-    # Si no se puede identificar el país, no se inventa una bandera.
-
-    return "⚽"
-
-def get_today_matches():
-
-    now_utc = datetime.now(timezone.utc)
-
-    today_honduras = datetime.now(LOCAL_TZ).date()
-
-    dates = {
-
-        now_utc.date().isoformat(),
-
-        (now_utc.date() + timedelta(days=1)).isoformat(),
-
-    }
-
-    matches_by_id = {}
-
-    for date in sorted(dates):
-
-        result = api_get("matches", {"date": date})
-
-        if not result:
-
-            continue
-
-        for match in result.get("data", []) or []:
-
-            match_id = match.get("id")
-
-            if match_id:
-
-                matches_by_id[match_id] = match
-
-    upcoming = []
-
-    for match in matches_by_id.values():
-
-        kickoff = parse_date(match.get("kickoffAt"))
-
-        if not kickoff or kickoff <= now_utc:
-
-            continue
-
-        if kickoff.astimezone(LOCAL_TZ).date() != today_honduras:
-
-            continue
-
-        status = str(match.get("status", "")).lower()
-
-        if status not in ("scheduled", "unknown"):
-
-            continue
-
-        home = match.get("homeTeam") or {}
-
-        away = match.get("awayTeam") or {}
-
-        if not home.get("id") or not away.get("id"):
-
-            continue
-
-        upcoming.append(match)
-
-    upcoming.sort(
-
-        key=lambda item: parse_date(item.get("kickoffAt"))
-
-        or now_utc
-
-    )
-
-    return upcoming
-
-def get_history(team_id, season):
-
-    cache_key = (team_id, str(season or ""))
-
-    if cache_key in history_cache:
-
-        return history_cache[cache_key]
-
-    params = {
-
-        "team": team_id,
-
-        "status": "finished",
-
-    }
-
-    if season:
-
-        params["season"] = season
-
-    result = api_get("matches", params)
-
-    if not result:
-
-        history_cache[cache_key] = []
-
-        return []
-
-    history_cache[cache_key] = result.get("data", []) or []
-
-    return history_cache[cache_key]
-
-def team_stats(team_id, season, target_kickoff):
-
-    history = get_history(team_id, season)
-
-    valid = []
-
-    for match in history:
-
-        kickoff = parse_date(match.get("kickoffAt"))
-
-        if not kickoff or kickoff >= target_kickoff:
-
-            continue
-
-        if str(match.get("status", "")).lower() != "finished":
-
-            continue
-
-        score = match.get("score") or {}
-
-        home_goals = score.get("home")
-
-        away_goals = score.get("away")
-
-        if not isinstance(home_goals, (int, float)):
-
-            continue
-
-        if not isinstance(away_goals, (int, float)):
-
-            continue
-
-        home = match.get("homeTeam") or {}
-
-        away = match.get("awayTeam") or {}
-
-        if home.get("id") == team_id:
-
-            goals_for = home_goals
-
-            goals_against = away_goals
-
-        elif away.get("id") == team_id:
-
-            goals_for = away_goals
-
-            goals_against = home_goals
-
-        else:
-
-            continue
-
-        valid.append({
-
-            "date": kickoff,
-
-            "gf": float(goals_for),
-
-            "ga": float(goals_against),
-
-            "total": float(home_goals + away_goals),
-
-        })
-
-    valid.sort(key=lambda item: item["date"], reverse=True)
-
-    valid = valid[:HISTORY_SIZE]
-
-    if len(valid) < HISTORY_SIZE:
+    if not kickoff or kickoff <= now:
 
         return None
 
-    count = len(valid)
-
-    return {
-
-        "matches": count,
-
-        "avg_for": sum(x["gf"] for x in valid) / count,
-
-        "avg_against": sum(x["ga"] for x in valid) / count,
-
-        "over_count": sum(x["total"] >= 3 for x in valid),
-
-        "over_rate": sum(x["total"] >= 3 for x in valid) / count,
-
-    }
-
-def poisson_over_25(expected_goals):
-
-    lam = max(0.01, expected_goals)
-
-    p0 = math.exp(-lam)
-
-    p1 = p0 * lam
-
-    p2 = p1 * lam / 2
-
-    return 1 - p0 - p1 - p2
-
-def analyze(match):
-
-    kickoff = parse_date(match.get("kickoffAt"))
-
-    if not kickoff:
+    if kickoff.astimezone(LOCAL_TZ).date() != today:
 
         return None
 
-    home = match.get("homeTeam") or {}
+    best_pick = None
 
-    away = match.get("awayTeam") or {}
+    for bookmaker in event.get("bookmakers", []):
 
-    season = match.get("season")
+        for market in bookmaker.get("markets", []):
 
-    home_stats = team_stats(home["id"], season, kickoff)
+            if market.get("key") != "totals":
 
-    away_stats = team_stats(away["id"], season, kickoff)
+                continue
 
-    if not home_stats or not away_stats:
+            outcomes = market.get("outcomes", [])
 
-        print(
+            over_prices = [
 
-            "Historial insuficiente:",
+                item for item in outcomes
 
-            home.get("name"), "vs", away.get("name")
+                if item.get("name", "").lower() == "over"
 
-        )
+                and item.get("point") == 2.5
 
-        return None
+            ]
 
-    home_expected = (
+            under_prices = [
 
-        home_stats["avg_for"] + away_stats["avg_against"]
+                item for item in outcomes
 
-    ) / 2
+                if item.get("name", "").lower() == "under"
 
-    away_expected = (
+                and item.get("point") == 2.5
 
-        away_stats["avg_for"] + home_stats["avg_against"]
+            ]
 
-    ) / 2
+            if not over_prices or not under_prices:
 
-    expected_total = home_expected + away_expected
+                continue
 
-    model_probability = poisson_over_25(expected_total)
+            over_odd = over_prices[0].get("price")
 
-    probability = (
+            under_odd = under_prices[0].get("price")
 
-        0.50 * model_probability
+            if not isinstance(over_odd, (int, float)):
 
-        + 0.25 * home_stats["over_rate"]
+                continue
 
-        + 0.25 * away_stats["over_rate"]
+            if not isinstance(under_odd, (int, float)):
 
-    )
+                continue
 
-    probability = min(0.95, max(0.0, probability))
+            if over_odd < MIN_ODD or under_odd <= 1:
 
-    return {
+                continue
 
-        "home": home.get("name", "Local"),
+            # Probabilidad implícita del mercado, ajustada
 
-        "away": away.get("name", "Visitante"),
+            # aproximadamente para eliminar el margen de la casa.
 
-        "flag": get_flag(match),
+            over_raw = 1 / over_odd
 
-        "probability": probability,
+            under_raw = 1 / under_odd
 
-        "expected_goals": expected_total,
+            probability = over_raw / (over_raw + under_raw)
 
-        "kickoff": kickoff,
+            if probability < MIN_PROBABILITY:
 
-    }
+                continue
+
+            candidate = {
+
+                "home": event.get("home_team", "Local"),
+
+                "away": event.get("away_team", "Visitante"),
+
+                "kickoff": kickoff,
+
+                "odd": over_odd,
+
+                "probability": probability,
+
+                "bookmaker": bookmaker.get("title", "Casa no identificada"),
+
+            }
+
+            if (
+
+                best_pick is None
+
+                or candidate["odd"] > best_pick["odd"]
+
+            ):
+
+                best_pick = candidate
+
+    return best_pick
 
 def main():
 
-    if not OPENFOOT_API_KEY:
+    if not ODDS_API_KEY:
 
-        raise SystemExit("Falta el secreto OPENFOOT_API_KEY.")
+        raise SystemExit("Falta el secreto THE_ODDS_API_KEY.")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 
@@ -536,25 +322,61 @@ def main():
 
     today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
 
-    print("Fecha Honduras:", today)
+    print(f"ESCÁNER OVER 2.5 — Honduras: {today}")
 
-    matches = get_today_matches()
-
-    print("Partidos futuros para hoy:", len(matches))
+    events_seen = set()
 
     picks = []
 
-    for match in matches:
+    for sport in SPORTS:
 
-        result = analyze(match)
+        events = get_odds(sport)
 
-        if result and result["probability"] >= MIN_PROBABILITY:
+        for event in events:
 
-            picks.append(result)
+            event_id = event.get("id")
+
+            if not event_id or event_id in events_seen:
+
+                continue
+
+            events_seen.add(event_id)
+
+            pick = analyze_event(event)
+
+            if pick:
+
+                picks.append(pick)
+
+    # Evita repetir un partido y conserva el mejor precio encontrado.
+
+    unique = {}
+
+    for pick in picks:
+
+        key = (pick["home"], pick["away"])
+
+        if (
+
+            key not in unique
+
+            or pick["odd"] > unique[key]["odd"]
+
+        ):
+
+            unique[key] = pick
+
+    picks = list(unique.values())
 
     picks.sort(
 
-        key=lambda item: item["probability"],
+        key=lambda item: (
+
+            item["probability"],
+
+            item["odd"],
+
+        ),
 
         reverse=True,
 
@@ -564,48 +386,82 @@ def main():
 
     if not picks:
 
-        send_telegram(
+        message = (
 
-            f"🔎 <b>OVER 2.5 GOLES — {today}</b>\n"
+            f"🔎 ESCÁNER OVER 2.5 — {today}\n\n"
 
-            "No se encontraron selecciones con datos suficientes "
+            "No se encontraron picks que cumplan los filtros "
 
-            "y probabilidad estimada mínima del 60%.\n"
+            "con cuotas disponibles.\n"
 
-            "No se dispone de cuotas verificadas; no se envían picks."
+            f"Cuota mínima: {MIN_ODD:.2f}\n"
+
+            "Probabilidad implícita ajustada mínima: 60%.\n\n"
+
+            "No se fuerza ninguna apuesta."
 
         )
 
-        print("No hay selecciones válidas.")
+        send_telegram(message)
+
+        print("Sin picks válidos.")
 
         return
 
-    # No se envían alertas hasta verificar la cuota real >= 1.50.
+    lines = [
 
-    # OpenFoot Starter no ha confirmado una fuente de cuotas.
+        f"⚽ ESCÁNER OVER 2.5 — {today}",
 
-    print(
+        f"Selecciones encontradas: {len(picks)}",
 
-        f"Hay {len(picks)} candidatos estadísticos, pero no se envían "
+        "",
 
-        "alertas porque no se han verificado cuotas >= 1.50."
+    ]
+
+    for number, pick in enumerate(picks, start=1):
+
+        local_time = pick["kickoff"].astimezone(LOCAL_TZ)
+
+        lines.extend([
+
+            f"#{number} {pick['home']} vs {pick['away']}",
+
+            "Pick: Más de 2.5 goles",
+
+            f"Cuota: {pick['odd']:.2f}",
+
+            (
+
+                "Probabilidad implícita ajustada: "
+
+                f"{pick['probability']:.1%}"
+
+            ),
+
+            f"Casa: {pick['bookmaker']}",
+
+            f"Hora Honduras: {local_time:%H:%M}",
+
+            "",
+
+        ])
+
+    lines.append(
+
+        "Nota: la probabilidad procede de las cuotas del mercado; "
+
+        "no es una predicción estadística independiente."
 
     )
 
-    send_telegram(
+    message = "\n".join(lines)
 
-        f"🔎 <b>ESCÁNER OVER 2.5 — {today}</b>\n"
+    sent = send_telegram(message)
 
-        f"Candidatos estadísticos encontrados: {len(picks)}.\n"
+    print(message)
 
-        "No se enviaron picks porque esta configuración todavía no "
-
-        "tiene una fuente de cuotas verificadas."
-
-    )
+    print("Telegram:", "mensaje enviado" if sent else "falló el envío")
 
 if __name__ == "__main__":
 
     main()
-
-    
