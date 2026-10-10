@@ -1,59 +1,47 @@
+steps:
 
+  - name: Descargar repositorio
 
-name: Bot fútbol alertas
+    uses: actions/checkout@v4
 
-on:
+  - name: Configurar Python
 
-  workflow_dispatch:
+    uses: actions/setup-python@v5
 
-  schedule:
+    with:
 
-    - cron: '15 12 * * *'
+      python-version: '3.11'
 
-    - cron: '0 15 * * *'
+  - name: Instalar dependencias
 
-    - cron: '0 18 * * *'
+    run: |
 
-    - cron: '0 21 * * *'
+      python -m pip install --upgrade pip
 
-jobs:
+      pip install -r requirements.txt
 
-  run-bot:
+  - name: Verificar configuración
 
-    runs-on: ubuntu-latest
+    env:
 
-    timeout-minutes: 10
+      OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
 
-    steps:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
-      - name: Descargar repositorio
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-        uses: actions/checkout@v4
+    run: |
 
-      - name: Configurar Python
+      python -c "import os, sys; names=['OPENFOOT_API_KEY','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID']; missing=[n for n in names if not os.getenv(n)]; print('Faltan secretos: '+', '.join(missing) if missing else 'Los tres secretos están configurados'); sys.exit(1 if missing else 0)"
 
-        uses: actions/setup-python@v5
+  - name: Ejecutar bot de fútbol
 
-        with:
+    env:
 
-          python-version: '3.11'
+      OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
 
-      - name: Instalar dependencias
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
-        run: |
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-          python -m pip install --upgrade pip
-
-          pip install -r requirements.txt
-
-      - name: Ejecutar bot de fútbol
-
-        env:
-
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: python bot.py
+    run: python bot.py
