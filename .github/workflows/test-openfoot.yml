@@ -1,0 +1,39 @@
+
+
+name: Probar OpenFoot API
+
+on:
+
+  workflow_dispatch:
+
+jobs:
+
+  test-api:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Descargar repositorio
+
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+
+        uses: actions/setup-python@v5
+
+        with:
+
+          python-version: "3.11"
+
+      - name: Instalar requests
+
+        run: pip install requests
+
+      - name: Probar conexión
+
+        env:
+
+          OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
+
+        run: python test_openfoot.py
