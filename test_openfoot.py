@@ -1,28 +1,18 @@
 import os
 
-from datetime import datetime, timezone
-
 import requests
+
+from datetime import datetime, timezone
 
 API_KEY = os.getenv("OPENFOOT_API_KEY")
 
 if not API_KEY:
 
-    raise SystemExit(
+    raise SystemExit("ERROR: Falta OPENFOOT_API_KEY.")
 
-        "ERROR: Falta OPENFOOT_API_KEY en el entorno."
+BASE_URL = "https://openfootapi.com/v1"
 
-    )
-
-url = "https://openfootapi.com/v1/matches"
-
-params = {
-
-    "date": datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-}
-
-headers = {
+HEADERS = {
 
     "Accept": "application/json",
 
@@ -30,13 +20,13 @@ headers = {
 
 }
 
-try:
+def consultar(endpoint, params=None):
 
     response = requests.get(
 
-        url,
+        f"{BASE_URL}/{endpoint}",
 
-        headers=headers,
+        headers=HEADERS,
 
         params=params,
 
@@ -44,62 +34,132 @@ try:
 
     )
 
+    print(f"\nEndpoint: {endpoint}")
+
     print("Código HTTP:", response.status_code)
 
     if response.status_code != 200:
 
-        print("La API rechazó la petición.")
+        print("Respuesta:", response.text[:400])
 
-        print("Respuesta:", response.text[:500])
+        return None
 
-        raise SystemExit(1)
+    return response.json()
 
-    result = response.json()
+try:
 
-    matches = result.get("data", [])
+    fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    print("Conexión correcta.")
+    resultado = consultar(
 
-    print("Partidos devueltos:", len(matches))
+        "matches",
 
-    print(
-
-        "Acceso:",
-
-        result.get("meta", {}).get("access", {})
+        {"date": fecha},
 
     )
 
-    if matches:
+    if resultado is None:
 
-        print(
+        raise SystemExit("No se pudieron obtener los partidos.")
 
-            "Campos del partido:",
+    partidos = resultado.get("data", [])
 
-            list(matches[0].keys())
+    print("Partidos encontrados:", len(partidos))
+
+    if not partidos:
+
+        raise SystemExit("No hay partidos para esa fecha.")
+
+    # Preferir un partido programado para analizar sus equipos.
+
+    partido = next(
+
+        (
+
+            p for p in partidos
+
+            if p.get("status") == "scheduled"
+
+        ),
+
+        partidos[0],
+
+    )
+
+    local = partido.get("homeTeam") or {}
+
+    visitante = partido.get("awayTeam") or {}
+
+    print("\nPartido de referencia:")
+
+    print(local.get("name"), "vs", visitante.get("name"))
+
+    for equipo in (local, visitante):
+
+        equipo_id = equipo.get("id")
+
+        if not equipo_id:
+
+            print("No se encontró el ID de un equipo.")
+
+            continue
+
+        print("\nHistorial de:", equipo.get("name"))
+
+        historial = consultar(
+
+            "matches",
+
+            {
+
+                "team": equipo_id,
+
+                "status": "finished",
+
+                "season": partido.get("season"),
+
+            },
 
         )
 
-        print("Datos del primer partido:", matches[0])
+        if historial is None:
 
-    print("\nPrimeros cinco partidos:")
+            continue
 
-    for match in matches[:5]:
+        encuentros = historial.get("data", [])
 
-        home_data = match.get("homeTeam") or {}
+        print("Partidos históricos devueltos:", len(encuentros))
 
-        away_data = match.get("awayTeam") or {}
+        encuentros.sort(
 
-        home = home_data.get("name", "Local desconocido")
+            key=lambda p: p.get("kickoffAt", ""),
 
-        away = away_data.get("name", "Visitante desconocido")
+            reverse=True,
 
-        print(f"- {home} vs {away}")
+        )
+
+        for juego in encuentros[:10]:
+
+            casa = juego.get("homeTeam") or {}
+
+            fuera = juego.get("awayTeam") or {}
+
+            marcador = juego.get("score") or {}
+
+            print(
+
+                f"- {juego.get('kickoffAt', 'Fecha desconocida')}: "
+
+                f"{casa.get('name', '?')} "
+
+                f"{marcador.get('home', '?')}-"
+
+                f"{marcador.get('away', '?')} "
+
+                f"{fuera.get('name', '?')}"
+
+            )
 
 except requests.RequestException as error:
 
     raise SystemExit(f"Error de conexión: {error}")
-
-except (ValueError, AttributeError) as error:
-
-    raise SystemExit(f"Error al interpretar la respuesta: {error}")
