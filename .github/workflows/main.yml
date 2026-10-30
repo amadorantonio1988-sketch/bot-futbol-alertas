@@ -24,7 +24,7 @@ jobs:
 
   bot-futbol:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     env:
 
@@ -38,11 +38,11 @@ jobs:
 
       - name: Descargar repositorio
 
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configurar Python
 
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
 
         with:
 
