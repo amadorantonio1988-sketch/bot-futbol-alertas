@@ -8,12 +8,6 @@ on:
 
     - cron: "15 12 * * *"
 
-    - cron: "0 15 * * *"
-
-    - cron: "0 18 * * *"
-
-    - cron: "0 21 * * *"
-
 permissions:
 
   contents: read
