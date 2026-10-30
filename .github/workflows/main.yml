@@ -28,7 +28,7 @@ jobs:
 
     env:
 
-      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+      OPENFOOT_API_KEY: ${{ secrets.OPENFOOT_API_KEY }}
 
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
@@ -60,7 +60,7 @@ jobs:
 
         run: |
 
-          test -n "$THE_ODDS_API_KEY" || (echo "Falta THE_ODDS_API_KEY" && exit 1)
+          test -n "$OPENFOOT_API_KEY" || (echo "Falta OPENFOOT_API_KEY" && exit 1)
 
           test -n "$TELEGRAM_BOT_TOKEN" || (echo "Falta TELEGRAM_BOT_TOKEN" && exit 1)
 
