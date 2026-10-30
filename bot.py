@@ -2,65 +2,227 @@
 
 import os
 
+import math
+
 import requests
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from zoneinfo import ZoneInfo
 
 # ==========================================
 
-# BOT FUTBOL: OVER 2.5 + CUOTAS + TELEGRAM
+# BOT FUTBOL - OPENFOOT STARTER + TELEGRAM
 
-# Fuente de cuotas: The Odds API
+# Mercado: OVER 2.5 GOLES
 
 # ==========================================
 
-ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY", "").strip()
+OPENFOOT_API_KEY = os.getenv("OPENFOOT_API_KEY", "").strip()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-BASE_URL = "https://api.the-odds-api.com/v4"
+BASE_URL = "https://openfootapi.com/v1"
 
 LOCAL_TZ = ZoneInfo("America/Tegucigalpa")
-
-MIN_ODD = 1.50
 
 MIN_PROBABILITY = 0.60
 
 MAX_ALERTS = 5
 
-# Competiciones disponibles en The Odds API.
+HISTORY_SIZE = 10
 
-SPORTS = [
+# Limite de consultas para proteger el plan gratuito.
 
-    "soccer_epl",
-
-    "soccer_spain_la_liga",
-
-    "soccer_germany_bundesliga",
-
-    "soccer_italy_serie_a",
-
-    "soccer_france_ligue_one",
-
-    "soccer_netherlands_eredivisie",
-
-    "soccer_portugal_primeira_liga",
-
-    "soccer_brazil_campeonato",
-
-    "soccer_usa_mls",
-
-    "soccer_mexico_ligamx",
-
-    "soccer_argentina_primera_division",
-
-]
+MAX_FIXTURES_TO_ANALYZE = 16
 
 session = requests.Session()
+
+session.headers.update({
+
+    "Accept": "application/json",
+
+    "Authorization": f"Bearer {OPENFOOT_API_KEY}",
+
+})
+
+# Competiciones que queremos analizar.
+
+LEAGUES = {
+
+    "england": {
+
+        "keywords": ["premier league"],
+
+        "name": "PREMIER LEAGUE",
+
+        "flag": "🇬🇧",
+
+    },
+
+    "spain": {
+
+        "keywords": ["la liga", "laliga", "primera division"],
+
+        "name": "LA LIGA",
+
+        "flag": "🇪🇸",
+
+    },
+
+    "germany": {
+
+        "keywords": ["bundesliga"],
+
+        "name": "BUNDESLIGA",
+
+        "flag": "🇩🇪",
+
+    },
+
+    "italy": {
+
+        "keywords": ["serie a"],
+
+        "name": "SERIE A",
+
+        "flag": "🇮🇹",
+
+    },
+
+    "france": {
+
+        "keywords": ["ligue 1"],
+
+        "name": "LIGUE 1",
+
+        "flag": "🇫🇷",
+
+    },
+
+    "netherlands": {
+
+        "keywords": ["eredivisie"],
+
+        "name": "EREDIVISIE",
+
+        "flag": "🇳🇱",
+
+    },
+
+    "portugal": {
+
+        "keywords": ["primeira liga", "liga portugal"],
+
+        "name": "PRIMEIRA LIGA",
+
+        "flag": "🇵🇹",
+
+    },
+
+    "brazil": {
+
+        "keywords": ["brasileirao serie a", "serie a brazil",
+
+                     "campeonato brasileiro serie a"],
+
+        "name": "BRASIL SERIE A",
+
+        "flag": "🇧🇷",
+
+    },
+
+    "usa": {
+
+        "keywords": ["major league soccer", "mls"],
+
+        "name": "MLS",
+
+        "flag": "🇺🇸",
+
+    },
+
+    "mexico": {
+
+        "keywords": ["liga mx"],
+
+        "name": "LIGA MX",
+
+        "flag": "🇲🇽",
+
+    },
+
+    "argentina": {
+
+        "keywords": ["liga profesional", "primera division argentina"],
+
+        "name": "PRIMERA ARGENTINA",
+
+        "flag": "🇦🇷",
+
+    },
+
+}
+
+def api_get(endpoint, params=None):
+
+    url = f"{BASE_URL}{endpoint}"
+
+    try:
+
+        response = session.get(
+
+            url,
+
+            params=params,
+
+            timeout=30,
+
+        )
+
+        if response.status_code == 401:
+
+            raise RuntimeError(
+
+                "OPENFOOT_API_KEY no válida. Revisa el secreto de GitHub."
+
+            )
+
+        if response.status_code == 403:
+
+            raise RuntimeError(
+
+                "OpenFoot rechazó el acceso. Comprueba el plan y el endpoint."
+
+            )
+
+        if response.status_code == 429:
+
+            raise RuntimeError(
+
+                "Se agotó el límite de consultas de OpenFoot."
+
+            )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        if isinstance(payload, dict) and payload.get("error"):
+
+            raise RuntimeError(str(payload["error"]))
+
+        if isinstance(payload, dict):
+
+            return payload.get("data", [])
+
+        return payload
+
+    except requests.RequestException as error:
+
+        raise RuntimeError(f"Error consultando OpenFoot: {error}")
 
 def send_telegram(message):
 
@@ -88,17 +250,15 @@ def send_telegram(message):
 
             },
 
-            timeout=20,
+            timeout=25,
 
         )
 
         response.raise_for_status()
 
-        data = response.json()
+        if not response.json().get("ok"):
 
-        if not data.get("ok"):
-
-            print("Telegram rechazó el mensaje:", data)
+            print("Telegram rechazó el mensaje.")
 
             return False
 
@@ -106,81 +266,9 @@ def send_telegram(message):
 
     except requests.RequestException as error:
 
-        print("Error enviando Telegram:", error)
+        print(f"Error enviando Telegram: {error}")
 
         return False
-
-def get_odds(sport):
-
-    url = f"{BASE_URL}/sports/{sport}/odds/"
-
-    params = {
-
-        "apiKey": ODDS_API_KEY,
-
-        "regions": "uk,eu",
-
-        "markets": "totals",
-
-        "oddsFormat": "decimal",
-
-        "dateFormat": "iso",
-
-    }
-
-    try:
-
-        response = session.get(url, params=params, timeout=25)
-
-        if response.status_code == 401:
-
-            raise SystemExit(
-
-                "THE_ODDS_API_KEY no es válida o no está autorizada."
-
-            )
-
-        if response.status_code == 429:
-
-            raise SystemExit(
-
-                "The Odds API rechazó la petición por límite de uso."
-
-            )
-
-        if response.status_code in (404, 422):
-
-            print(f"Competición no disponible: {sport}")
-
-            return []
-
-        if response.status_code != 200:
-
-            print(
-
-                f"Error HTTP {response.status_code} en {sport}: "
-
-                f"{response.text[:200]}"
-
-            )
-
-            return []
-
-        remaining = response.headers.get(
-
-            "x-requests-remaining", "desconocido"
-
-        )
-
-        print(f"{sport}: consultas restantes según API: {remaining}")
-
-        return response.json()
-
-    except requests.RequestException as error:
-
-        print(f"Error consultando {sport}: {error}")
-
-        return []
 
 def parse_date(value):
 
@@ -190,127 +278,475 @@ def parse_date(value):
 
     try:
 
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        result = datetime.fromisoformat(
 
-    except (TypeError, ValueError):
+            value.replace("Z", "+00:00")
+
+        )
+
+        if result.tzinfo is None:
+
+            result = result.replace(tzinfo=timezone.utc)
+
+        return result
+
+    except (ValueError, TypeError, AttributeError):
 
         return None
 
-def analyze_event(event):
+def get_competition_text(competition):
 
-    kickoff = parse_date(event.get("commence_time"))
+    if isinstance(competition, dict):
+
+        return " ".join([
+
+            str(competition.get("name", "")),
+
+            str(competition.get("country", "")),
+
+            str(competition.get("slug", "")),
+
+        ]).lower()
+
+    return str(competition or "").lower()
+
+def identify_league(competition):
+
+    text = get_competition_text(competition)
+
+    for league in LEAGUES.values():
+
+        for keyword in league["keywords"]:
+
+            if keyword in text:
+
+                return league
+
+    return None
+
+def get_competitions():
+
+    data = api_get("/competitions")
+
+    if not isinstance(data, list):
+
+        raise RuntimeError(
+
+            "OpenFoot no devolvió una lista válida de competiciones."
+
+        )
+
+    result = {}
+
+    for competition in data:
+
+        if not isinstance(competition, dict):
+
+            continue
+
+        league = identify_league(competition)
+
+        if not league:
+
+            continue
+
+        competition_id = (
+
+            competition.get("id")
+
+            or competition.get("competitionId")
+
+        )
+
+        if competition_id:
+
+            result[str(competition_id)] = league
+
+    print(f"Competiciones reconocidas: {len(result)}")
+
+    return result
+
+def get_today_fixtures():
 
     now = datetime.now(timezone.utc)
 
-    today = datetime.now(LOCAL_TZ).date()
+    local_today = datetime.now(LOCAL_TZ).date()
 
-    if not kickoff or kickoff <= now:
+    competitions = get_competitions()
 
-        return None
+    fixtures = []
 
-    if kickoff.astimezone(LOCAL_TZ).date() != today:
+    seen = set()
 
-        return None
+    # Consultamos ayer, hoy y mañana UTC para cubrir
 
-    best_pick = None
+    # correctamente el día local de Honduras.
 
-    for bookmaker in event.get("bookmakers", []):
+    for offset in (-1, 0, 1):
 
-        for market in bookmaker.get("markets", []):
+        utc_date = (now.date() + timedelta(days=offset)).isoformat()
 
-            if market.get("key") != "totals":
+        matches = api_get(
 
-                continue
+            "/matches",
 
-            outcomes = market.get("outcomes", [])
+            params={"date": utc_date},
 
-            over_prices = [
+        )
 
-                item for item in outcomes
+        if not isinstance(matches, list):
 
-                if item.get("name", "").lower() == "over"
+            continue
 
-                and item.get("point") == 2.5
+        for match in matches:
 
-            ]
-
-            under_prices = [
-
-                item for item in outcomes
-
-                if item.get("name", "").lower() == "under"
-
-                and item.get("point") == 2.5
-
-            ]
-
-            if not over_prices or not under_prices:
+            if not isinstance(match, dict):
 
                 continue
 
-            over_odd = over_prices[0].get("price")
+            match_id = match.get("id")
 
-            under_odd = under_prices[0].get("price")
-
-            if not isinstance(over_odd, (int, float)):
+            if not match_id or match_id in seen:
 
                 continue
 
-            if not isinstance(under_odd, (int, float)):
+            seen.add(match_id)
+
+            kickoff = parse_date(match.get("kickoffAt"))
+
+            if not kickoff:
 
                 continue
 
-            if over_odd < MIN_ODD or under_odd <= 1:
+            if kickoff <= now:
 
                 continue
 
-            # Probabilidad implícita del mercado, ajustada
-
-            # aproximadamente para eliminar el margen de la casa.
-
-            over_raw = 1 / over_odd
-
-            under_raw = 1 / under_odd
-
-            probability = over_raw / (over_raw + under_raw)
-
-            if probability < MIN_PROBABILITY:
+            if kickoff.astimezone(LOCAL_TZ).date() != local_today:
 
                 continue
 
-            candidate = {
+            competition_id = str(match.get("competitionId", ""))
 
-                "home": event.get("home_team", "Local"),
+            league = competitions.get(competition_id)
 
-                "away": event.get("away_team", "Visitante"),
+            if not league:
+
+                league = identify_league(
+
+                    match.get("competition")
+
+                )
+
+            if not league:
+
+                continue
+
+            home = match.get("homeTeam") or {}
+
+            away = match.get("awayTeam") or {}
+
+            if not home.get("id") or not away.get("id"):
+
+                continue
+
+            if not home.get("name") or not away.get("name"):
+
+                continue
+
+            fixtures.append({
+
+                "id": match_id,
+
+                "home_id": str(home["id"]),
+
+                "away_id": str(away["id"]),
+
+                "home": home["name"],
+
+                "away": away["name"],
 
                 "kickoff": kickoff,
 
-                "odd": over_odd,
+                "league": league,
 
-                "probability": probability,
+            })
 
-                "bookmaker": bookmaker.get("title", "Casa no identificada"),
+    fixtures.sort(key=lambda item: item["kickoff"])
 
-            }
+    print(f"Partidos encontrados para hoy: {len(fixtures)}")
 
-            if (
+    if len(fixtures) > MAX_FIXTURES_TO_ANALYZE:
 
-                best_pick is None
+        print(
 
-                or candidate["odd"] > best_pick["odd"]
+            f"Se analizarán los primeros "
 
-            ):
+            f"{MAX_FIXTURES_TO_ANALYZE} partidos "
 
-                best_pick = candidate
+            "para proteger la cuota gratuita."
 
-    return best_pick
+        )
+
+    return fixtures[:MAX_FIXTURES_TO_ANALYZE]
+
+def get_score(match):
+
+    possible_scores = [
+
+        match.get("score"),
+
+        match.get("scores"),
+
+        match.get("fullTime"),
+
+    ]
+
+    for score in possible_scores:
+
+        if not isinstance(score, dict):
+
+            continue
+
+        home = score.get("home")
+
+        away = score.get("away")
+
+        if home is None or away is None:
+
+            home = score.get("homeScore", home)
+
+            away = score.get("awayScore", away)
+
+        if isinstance(home, dict):
+
+            home = home.get("goals")
+
+        if isinstance(away, dict):
+
+            away = away.get("goals")
+
+        if (
+
+            isinstance(home, (int, float))
+
+            and isinstance(away, (int, float))
+
+        ):
+
+            return int(home), int(away)
+
+    home = match.get("homeScore")
+
+    away = match.get("awayScore")
+
+    if (
+
+        isinstance(home, (int, float))
+
+        and isinstance(away, (int, float))
+
+    ):
+
+        return int(home), int(away)
+
+    return None
+
+history_cache = {}
+
+def get_team_history(team_id):
+
+    if team_id in history_cache:
+
+        return history_cache[team_id]
+
+    matches = api_get(
+
+        "/matches",
+
+        params={
+
+            "team": team_id,
+
+            "status": "finished",
+
+        },
+
+    )
+
+    if not isinstance(matches, list):
+
+        matches = []
+
+    valid = []
+
+    for match in matches:
+
+        if not isinstance(match, dict):
+
+            continue
+
+        score = get_score(match)
+
+        kickoff = parse_date(match.get("kickoffAt"))
+
+        if score is None or kickoff is None:
+
+            continue
+
+        valid.append({
+
+            "kickoff": kickoff,
+
+            "home_id": str(
+
+                (match.get("homeTeam") or {}).get("id", "")
+
+            ),
+
+            "score": score,
+
+        })
+
+    valid.sort(
+
+        key=lambda item: item["kickoff"],
+
+        reverse=True,
+
+    )
+
+    history = valid[:HISTORY_SIZE]
+
+    history_cache[team_id] = history
+
+    return history
+
+def team_goals(history, team_id):
+
+    scored = []
+
+    conceded = []
+
+    for match in history:
+
+        home_goals, away_goals = match["score"]
+
+        if match["home_id"] == team_id:
+
+            scored.append(home_goals)
+
+            conceded.append(away_goals)
+
+        else:
+
+            scored.append(away_goals)
+
+            conceded.append(home_goals)
+
+    return scored, conceded
+
+def poisson_over_25(expected_goals):
+
+    if expected_goals <= 0:
+
+        return 0.0
+
+    probability = 1 - math.exp(-expected_goals) * (
+
+        1 + expected_goals + (expected_goals ** 2 / 2)
+
+    )
+
+    return max(0.0, min(1.0, probability))
+
+def analyze_match(fixture):
+
+    home_history = get_team_history(fixture["home_id"])
+
+    away_history = get_team_history(fixture["away_id"])
+
+    if (
+
+        len(home_history) < HISTORY_SIZE
+
+        or len(away_history) < HISTORY_SIZE
+
+    ):
+
+        print(
+
+            f"Historial insuficiente: "
+
+            f"{fixture['home']} - {fixture['away']}"
+
+        )
+
+        return None
+
+    home_scored, home_conceded = team_goals(
+
+        home_history,
+
+        fixture["home_id"],
+
+    )
+
+    away_scored, away_conceded = team_goals(
+
+        away_history,
+
+        fixture["away_id"],
+
+    )
+
+    # Promedios generales de los últimos 10 partidos.
+
+    home_attack = sum(home_scored) / HISTORY_SIZE
+
+    home_defense = sum(home_conceded) / HISTORY_SIZE
+
+    away_attack = sum(away_scored) / HISTORY_SIZE
+
+    away_defense = sum(away_conceded) / HISTORY_SIZE
+
+    # Estimación de goles esperados para ambos equipos.
+
+    expected_home = (home_attack + away_defense) / 2
+
+    expected_away = (away_attack + home_defense) / 2
+
+    expected_total = expected_home + expected_away
+
+    probability = poisson_over_25(expected_total)
+
+    print(
+
+        f"{fixture['home']} - {fixture['away']}: "
+
+        f"{probability:.1%}"
+
+    )
+
+    if probability < MIN_PROBABILITY:
+
+        return None
+
+    return {
+
+        **fixture,
+
+        "probability": probability,
+
+        "expected_goals": expected_total,
+
+    }
 
 def main():
 
-    if not ODDS_API_KEY:
+    if not OPENFOOT_API_KEY:
 
-        raise SystemExit("Falta el secreto THE_ODDS_API_KEY.")
+        raise SystemExit("Falta OPENFOOT_API_KEY.")
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 
@@ -322,61 +758,23 @@ def main():
 
     today = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
 
-    print(f"ESCÁNER OVER 2.5 — Honduras: {today}")
+    print(f"ESCÁNER OVER 2.5 — HONDURAS: {today}")
 
-    events_seen = set()
+    fixtures = get_today_fixtures()
 
     picks = []
 
-    for sport in SPORTS:
+    for fixture in fixtures:
 
-        events = get_odds(sport)
+        pick = analyze_match(fixture)
 
-        for event in events:
+        if pick:
 
-            event_id = event.get("id")
-
-            if not event_id or event_id in events_seen:
-
-                continue
-
-            events_seen.add(event_id)
-
-            pick = analyze_event(event)
-
-            if pick:
-
-                picks.append(pick)
-
-    # Evita repetir un partido y conserva el mejor precio encontrado.
-
-    unique = {}
-
-    for pick in picks:
-
-        key = (pick["home"], pick["away"])
-
-        if (
-
-            key not in unique
-
-            or pick["odd"] > unique[key]["odd"]
-
-        ):
-
-            unique[key] = pick
-
-    picks = list(unique.values())
+            picks.append(pick)
 
     picks.sort(
 
-        key=lambda item: (
-
-            item["probability"],
-
-            item["odd"],
-
-        ),
+        key=lambda item: item["probability"],
 
         reverse=True,
 
@@ -390,21 +788,23 @@ def main():
 
             f"🔎 ESCÁNER OVER 2.5 — {today}\n\n"
 
-            "No se encontraron picks que cumplan los filtros "
+            "No se encontraron selecciones que cumplan "
 
-            "con cuotas disponibles.\n"
+            "los filtros estadísticos.\n\n"
 
-            f"Cuota mínima: {MIN_ODD:.2f}\n"
+            f"Probabilidad mínima: {MIN_PROBABILITY:.0%}\n"
 
-            "Probabilidad implícita ajustada mínima: 60%.\n\n"
+            f"Historial requerido: últimos {HISTORY_SIZE} partidos.\n\n"
 
             "No se fuerza ninguna apuesta."
 
         )
 
-        send_telegram(message)
+        sent = send_telegram(message)
 
-        print("Sin picks válidos.")
+        print(message)
+
+        print("Telegram:", "enviado" if sent else "falló")
 
         return
 
@@ -422,23 +822,17 @@ def main():
 
         local_time = pick["kickoff"].astimezone(LOCAL_TZ)
 
+        league = pick["league"]
+
         lines.extend([
+
+            f"{league['flag']} {league['name']}",
 
             f"#{number} {pick['home']} vs {pick['away']}",
 
             "Pick: Más de 2.5 goles",
 
-            f"Cuota: {pick['odd']:.2f}",
-
-            (
-
-                "Probabilidad implícita ajustada: "
-
-                f"{pick['probability']:.1%}"
-
-            ),
-
-            f"Casa: {pick['bookmaker']}",
+            f"Probabilidad estimada: {pick['probability']:.1%}",
 
             f"Hora Honduras: {local_time:%H:%M}",
 
@@ -448,9 +842,9 @@ def main():
 
     lines.append(
 
-        "Nota: la probabilidad procede de las cuotas del mercado; "
+        "Estimación estadística basada en los últimos "
 
-        "no es una predicción estadística independiente."
+        "10 partidos de cada equipo. No garantiza resultados."
 
     )
 
@@ -460,7 +854,13 @@ def main():
 
     print(message)
 
-    print("Telegram:", "mensaje enviado" if sent else "falló el envío")
+    print(
+
+        "Telegram:",
+
+        "mensaje enviado" if sent else "falló el envío"
+
+    )
 
 if __name__ == "__main__":
 
