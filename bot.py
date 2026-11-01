@@ -20,7 +20,7 @@ LOCAL_TZ = ZoneInfo("America/Tegucigalpa")
 
 MIN_ODD = 1.50
 MIN_PROBABILITY = 0.60
-MAX_ALERTS = 5
+MAX_ALERTS = 3
 
 # Competiciones disponibles en The Odds API.
 SPORTS = [
